@@ -46,7 +46,7 @@ APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "apify/instagram-scraper")
 APIFY_SEARCH_ACTOR_ID = os.getenv("APIFY_SEARCH_ACTOR_ID", "apify/instagram-search-scraper")
 APIFY_HASHTAG_ACTOR_ID = os.getenv("APIFY_HASHTAG_ACTOR_ID", "apify/instagram-hashtag-analytics-scraper")
 APIFY_RUN_TIMEOUT = int(os.getenv("APIFY_RUN_TIMEOUT", "300"))  # seconds
-FALLBACK_TO_DEMO = os.getenv("FALLBACK_TO_DEMO", "false").lower() in ("1", "true", "yes")
+FALLBACK_TO_DEMO = os.getenv("FALLBACK_TO_DEMO", "true").lower() in ("1", "true", "yes")
 
 # Simple in-process TTL cache so repeated handles (e.g. compare mode re-fetching
 # the main account) don't re-trigger a paid actor run within the TTL window.

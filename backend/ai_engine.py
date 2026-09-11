@@ -51,10 +51,17 @@ from models import (
 # OpenAI-compatible provider (OpenRouter, MiniMax, OpenAI, ...). Set all three
 # to enable LLM-generated reports; leave LLM_API_KEY blank to use the
 # rule-based fallbacks instead.
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "minimax/minimax-m3")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
+LLM_MODEL = (os.getenv("LLM_MODEL", "") or "").strip() or "minimax/minimax-m3"
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+
+# NVIDIA NIM auto-detection: keys like nvapi-... must go to NVIDIA's
+# OpenAI-compatible endpoint. Without this, the SDK silently targets OpenAI,
+# auth fails, and every chain quietly falls back to the same templates.
+if LLM_API_KEY.startswith("nvapi") and not LLM_BASE_URL:
+    LLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+    LLM_MODEL = (os.getenv("LLM_MODEL", "") or "").strip() or "meta/llama-3.1-8b-instruct"
 
 
 # ---------------------------------------------------------------------------
