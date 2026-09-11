@@ -1,0 +1,24 @@
+# Render Blueprint — one-click deploy for the InstaIQ backend.
+# Render reads this file when you choose "New +" → "Blueprint" on this repo.
+services:
+  - type: web
+    name: instaiq-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.4"
+      - key: DATA_MODE
+        value: live
+      # Secrets: set these in the Render dashboard after the first deploy
+      # (marked sync:false so the blueprint never hardcodes them).
+      - key: APIFY_TOKEN
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
