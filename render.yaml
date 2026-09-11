@@ -14,6 +14,10 @@ services:
         value: "3.13.4"
       - key: DATA_MODE
         value: live
+      # When Apify credits run out (402/401), serve deterministic demo data
+      # instead of erroring — auto-recovers when credits renew.
+      - key: FALLBACK_TO_DEMO
+        value: "true"
       # Secrets: set these in the Render dashboard after the first deploy
       # (marked sync:false so the blueprint never hardcodes them).
       - key: APIFY_TOKEN
