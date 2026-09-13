@@ -14,9 +14,27 @@ export default function ProfileReadout({ insight }) {
         <p className="handle">
           @{profile.username}
           {profile.is_verified && <span className="badge">VERIFIED</span>}
-          {profile.data_age_hours != null && (
+          {profile.data_age_hours === -1 && (
             <span
-              title={`Live providers were unavailable — showing the last real fetch for this account (${profile.data_age_hours}h ago)`}
+              title="No cached real data exists for this handle yet — all numbers below are SIMULATED so the analysis still works. They are NOT real Instagram statistics."
+              style={{
+                marginLeft: 6,
+                fontSize: 10,
+                fontWeight: 700,
+                color: '#FFFFFF',
+                background: '#E5484D',
+                borderRadius: 8,
+                padding: '2px 7px',
+                verticalAlign: 'middle',
+                letterSpacing: '0.4px',
+              }}
+            >
+              SIMULATED DATA
+            </span>
+          )}
+          {profile.data_age_hours != null && profile.data_age_hours >= 0 && (
+            <span
+              title={`Real Instagram data from the local cache, fetched ${profile.data_age_hours}h ago`}
               style={{
                 marginLeft: 6,
                 fontSize: 10,
