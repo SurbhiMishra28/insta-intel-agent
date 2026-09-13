@@ -23,4 +23,6 @@ backend/scan_history.db
 backend/profile_cache.db
 backend/insta_cache.db
 backend/_t*.json
+backend/_e2e.json
+backend/_v*.json
 backend/_verify_*.json
