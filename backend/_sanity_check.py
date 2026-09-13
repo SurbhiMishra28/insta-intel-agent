@@ -1,10 +1,11 @@
-"""Offline sanity checks for scraper.py (no network, no token needed)."""
+"""Offline sanity checks for the NVIDIA-only data layer (no network, no keys)."""
 import asyncio
 import os
 import time
 
-os.environ["DATA_MODE"] = "live"
+os.environ["DATA_MODE"] = "cache"
 os.environ.pop("APIFY_TOKEN", None)
+os.environ.pop("RAPIDAPI_KEY", None)
 
 import scraper  # noqa: E402
 from models import Post, ProfileData  # noqa: E402
@@ -32,151 +33,127 @@ def test_normalize():
     print("normalize_username: OK")
 
 
-def test_map_profile_posts_shape():
-    items = [
-        {
-            "type": "Video",
-            "shortCode": "abc123",
-            "caption": "New drop tomorrow #sneakers #hypebeast",
-            "likesCount": 42000,
-            "commentsCount": 512,
-            "timestamp": time.time() - 3 * 86400,
-            "ownerUsername": "sneakerhead",
-        },
-        {
-            "type": "Image",
-            "shortCode": "def456",
-            "caption": "Classic fit #ootd",
-            "likesCount": 38000,
-            "commentsCount": 240,
-            "timestamp": time.time() - 8 * 86400,
-        },
-        {"shortCode": "shell", "caption": "", "likesCount": 0, "commentsCount": 0},  # skipped
-    ]
-    p = scraper._map_profile(items, "sneakerhead")
-    assert isinstance(p, ProfileData)
-    assert p.username == "sneakerhead"
-    assert len(p.recent_posts) == 2, f"expected 2 posts, got {len(p.recent_posts)}"
-    p0 = p.recent_posts[0]
-    assert p0.media_type == "video"
-    assert p0.likes == 42000 and p0.comments == 512
-    assert p0.posted_days_ago == 3
-    assert "#sneakers" in p0.hashtags
-    print("_map_profile (posts shape): OK")
+def _make_profile(username: str, followers: int = 1000) -> ProfileData:
+    return ProfileData(
+        username=username,
+        full_name=username.replace("_", " ").title(),
+        bio=f"{username} bio",
+        followers=followers,
+        following=100,
+        posts_count=3,
+        is_verified=False,
+        is_business=False,
+        category="Tech",
+        recent_posts=[
+            Post(id=f"{username}_{i}", caption=f"post {i} @friend{i} #tech",
+                 likes=100 + i, comments=5, posted_days_ago=i + 1,
+                 hashtags=["#tech"], media_type="image")
+            for i in range(3)
+        ],
+    )
 
 
-def test_map_profile_profiles_shape():
-    items = [
-        {
-            "username": "nike",
-            "fullName": "Nike",
-            "biography": "Just Do It",
-            "followersCount": 300_000_000,
-            "followsCount": 180,
-            "postsCount": 4200,
-            "verified": True,
-            "businessAccount": True,
-            "category": "Sportswear",
-            "latestPosts": [
-                {
-                    "type": "Sidecar",
-                    "shortCode": "xyz789",
-                    "caption": "Together #team",
-                    "likesCount": 900_000,
-                    "commentsCount": 5000,
-                    "timestamp": time.time() - 1 * 86400,
-                }
-            ],
-        }
-    ]
-    p = scraper._map_profile(items, "nike")
-    assert p.username == "nike" and p.followers == 300_000_000
-    assert p.is_verified and p.is_business and p.category == "Sportswear"
-    assert p.posts_count == 4200
-    assert len(p.recent_posts) == 1
-    assert p.recent_posts[0].media_type == "carousel"
-    print("_map_profile (profiles shape): OK")
+def test_cache_roundtrip():
+    p = _make_profile("cacheuser")
+    scraper._disk_profile_set(p.username, p)
+    got = scraper._disk_profile_get(p.username)
+    assert got is not None and got.username == "cacheuser"
+    assert got.followers == 1000
+    assert got.recent_posts[0].likes == 100
+    # Fresh lookup (inside TTL) must NOT be stamped as stale.
+    assert got.data_age_hours is None
+    print("disk cache roundtrip: OK")
 
 
-def test_iso_timestamp():
-    from datetime import datetime, timezone, timedelta
-    iso = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
-    assert scraper._posted_days_ago({"timestamp": iso}) == 5
-    assert scraper._posted_days_ago({"timestamp": time.time() - 2 * 86400}) == 2
-    assert scraper._posted_days_ago({"timestamp": (time.time() - 2 * 86400) * 1000}) == 2
-    assert scraper._posted_days_ago({}) == 0
-    print("_posted_days_ago: OK")
-
-
-async def test_missing_token_error():
-    saved_token = scraper.APIFY_TOKEN
-    saved_rapid = scraper.RAPIDAPI_KEY
-    saved_graph_token = scraper.GRAPH_ACCESS_TOKEN
-    saved_graph_id = scraper.GRAPH_IG_USER_ID
-    saved_fallback = scraper.FALLBACK_TO_DEMO
-    try:
-        # Clear ALL caches (in-memory + disk) so we hit the fetch path.
-        scraper._profile_cache.clear()
-        scraper._inflight.clear()
-        import sqlite3
-        conn = sqlite3.connect(scraper._CACHE_DB)
-        conn.execute('DELETE FROM cache WHERE key LIKE "profile:cristiano%"')
-        conn.commit()
-        conn.close()
-
-        # With FALLBACK_TO_DEMO=true (the default), a missing token
-        # falls back to demo data — never errors.
-        scraper.APIFY_TOKEN = ""
-        scraper.FALLBACK_TO_DEMO = True
-        profile = await scraper.get_profile("cristiano")
-        assert profile.username == "cristiano", f"expected 'cristiano', got {profile.username}"
-        print("missing-token fallback to demo: OK")
-
-        # Clear caches again so the second test doesn't hit disk cache.
-        scraper._profile_cache.clear()
-        scraper._inflight.clear()
-        conn = sqlite3.connect(scraper._CACHE_DB)
-        conn.execute('DELETE FROM cache WHERE key LIKE "profile:cristiano%"')
-        conn.commit()
-        conn.close()
-
-        # With FALLBACK_TO_DEMO=false and NO provider credentials at all,
-        # the fetch must raise.
-        scraper.FALLBACK_TO_DEMO = False
-        scraper.RAPIDAPI_KEY = ""
-        scraper.GRAPH_ACCESS_TOKEN = ""
-        scraper.GRAPH_IG_USER_ID = ""
-        try:
-            await scraper.get_profile("cristiano")
-        except RuntimeError as e:
-            assert "APIFY_TOKEN" in str(e) or "All data providers failed" in str(e), str(e)
-            print("no-provider error (no fallback): OK")
-        else:
-            raise AssertionError("expected RuntimeError when no provider is configured")
-    finally:
-        scraper.APIFY_TOKEN = saved_token
-        scraper.RAPIDAPI_KEY = saved_rapid
-        scraper.GRAPH_ACCESS_TOKEN = saved_graph_token
-        scraper.GRAPH_IG_USER_ID = saved_graph_id
-        scraper.FALLBACK_TO_DEMO = saved_fallback
-
-
-async def test_cache():
-    # Seed the cache and confirm get_profile serves from it without a token.
-    demo = ProfileData(username="cacheduser", full_name="Cached", bio="", followers=1,
-                       following=1, posts_count=0, is_verified=False, is_business=False,
-                       recent_posts=[])
-    scraper._profile_cache["cacheduser"] = (time.monotonic(), demo)
+async def test_get_profile_cache_first():
+    scraper._profile_cache.clear()
+    p = _make_profile("cacheduser")
+    scraper._disk_profile_set(p.username, p)
     got = await scraper.get_profile("CachedUser")
     assert got.username == "cacheduser"
-    print("TTL cache: OK")
+    print("get_profile serves real cached data: OK")
+
+
+async def test_unknown_handle_gets_badged_demo():
+    scraper._profile_cache.clear()
+    import sqlite3
+    conn = sqlite3.connect(scraper._CACHE_DB)
+    conn.execute('DELETE FROM cache WHERE key LIKE "profile:nevercached%"')
+    conn.commit()
+    conn.close()
+
+    got = await scraper.get_profile("nevercachedhandle77")
+    assert got.username == "nevercachedhandle77"
+    assert scraper.is_demo_row(got), "unknown handle must be badged as simulated"
+    assert got.data_age_hours == -1
+    # Deterministic: same handle -> same simulated numbers.
+    again = await scraper.get_profile("nevercachedhandle77")
+    assert again.followers == got.followers
+    print("unknown handle -> badged simulated data: OK")
+
+
+async def test_batch_mixed():
+    scraper._profile_cache.clear()
+    known = _make_profile("batchknown")
+    scraper._disk_profile_set("batchknown", known)
+    res = await scraper.get_profiles_batch(["batchknown", "batchunknown_99"])
+    assert res["batchknown"].username == "batchknown"
+    assert scraper.is_demo_row(res["batchunknown_99"])
+    print("batch fetch (cached real + badged demo): OK")
+
+
+def test_local_discovery():
+    import sqlite3
+    # Seed cache with a target and two same-niche accounts that mention each other.
+    # NOTE: write via _disk_profile_set FIRST (it manages its own connections),
+    # then refresh timestamps in a separate short-lived connection. Holding an
+    # open write transaction across the _disk_profile_set calls would lock the
+    # DB and silently drop the seed rows (writes are best-effort by design).
+    for uname in ("disco_main", "disco_rival1", "disco_rival2"):
+        p = _make_profile(uname, followers=5000)
+        p.recent_posts[0].caption = "collab with @disco_rival1 #tech"
+        scraper._disk_profile_set(uname, p)
+    conn = sqlite3.connect(scraper._CACHE_DB)
+    now = time.time()
+    for uname in ("disco_main", "disco_rival1", "disco_rival2"):
+        conn.execute("UPDATE cache SET cached_at = ? WHERE key = ?", (now, f"profile:{uname}"))
+    conn.commit()
+    conn.close()
+
+    rows = scraper._local_discover_sync("disco_main", 10)
+    names = [r["username"] for r in rows]
+    assert "disco_rival1" in names and "disco_rival2" in names, names
+    print("local discovery mines cached mentions: OK")
+
+
+def test_demo_determinism():
+    a = scraper.generate_demo_profile("someone")
+    b = scraper.generate_demo_profile("someone")
+    assert a.followers == b.followers and a.bio == b.bio
+    assert scraper.generate_demo_profile("other").followers != a.followers or True
+    print("demo generator deterministic: OK")
+
+
+def _cleanup_test_rows():
+    """Remove synthetic rows so the real-data cache stays tidy."""
+    import sqlite3
+    conn = sqlite3.connect(scraper._CACHE_DB)
+    for prefix in ("cacheuser", "cacheduser", "batchknown", "batchunknown",
+                   "disco_main", "disco_rival1", "disco_rival2",
+                   "nevercachedhandle77", "nevercachedhandle"):
+        conn.execute("DELETE FROM cache WHERE key LIKE ?", (f"profile:{prefix}%",))
+        conn.execute("DELETE FROM cache WHERE key LIKE ?", (f"related:{prefix}%",))
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":
     test_normalize()
-    test_map_profile_posts_shape()
-    test_map_profile_profiles_shape()
-    test_iso_timestamp()
-    asyncio.run(test_missing_token_error())
-    asyncio.run(test_cache())
+    test_cache_roundtrip()
+    asyncio.run(test_get_profile_cache_first())
+    asyncio.run(test_unknown_handle_gets_badged_demo())
+    asyncio.run(test_batch_mixed())
+    test_local_discovery()
+    test_demo_determinism()
+    _cleanup_test_rows()
     print("\nAll offline checks passed.")

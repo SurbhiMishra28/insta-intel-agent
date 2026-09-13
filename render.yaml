@@ -12,25 +12,18 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.4"
+      # Data comes from the local cache of past fetches; unknown handles get
+      # clearly-badged simulated data. No third-party data API is called.
       - key: DATA_MODE
-        value: live
-      # Real data only: when provider credits run out, fail loudly instead
-      # of silently serving simulated demo profiles.
-      - key: FALLBACK_TO_DEMO
-        value: "false"
-      # Secrets: set these in the Render dashboard after the first deploy
-      # (marked sync:false so the blueprint never hardcodes them).
-      - key: APIFY_TOKEN
-        sync: false
-      - key: RAPIDAPI_KEY
-        sync: false
-      - key: GRAPH_ACCESS_TOKEN
-        sync: false
-      - key: GRAPH_IG_USER_ID
-        sync: false
-      - key: LLM_API_KEY
-        sync: false
+        value: cache
+      # All AI analysis runs on NVIDIA NIM.
       - key: LLM_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: LLM_MODEL
+        value: openai/gpt-oss-20b
+      # Secret: set this in the Render dashboard after the first deploy
+      # (marked sync:false so the blueprint never hardcodes it).
+      - key: LLM_API_KEY
         sync: false
 
   - type: web

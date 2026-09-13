@@ -69,10 +69,12 @@ app = FastAPI(
     title="AI Instagram Profile & Competitor Intelligence Agent",
     description=(
         "Analyzes an Instagram profile, auto-discovers and researches its "
-        "5-10 strongest competitors, and produces an AI-written competitive "
-        "intelligence report (LangChain-based reasoning over real data)."
+        "strongest competitors, and produces an AI-written competitive "
+        "intelligence report. Runs entirely on the NVIDIA NIM API: real "
+        "profile data is served from the local cache of past fetches, and "
+        "unknown handles get clearly-badged simulated data."
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -90,7 +92,7 @@ def root():
         "status": "ok",
         "service": "insta-intel-agent",
         "data_mode": scraper.DATA_MODE,
-        "data_provider": scraper.DATA_PROVIDER,
+        "data_source": "local-cache + NVIDIA-only AI",
         "ai_engine": "langchain" if ai_engine.LLM_API_KEY else "rule-based-fallback",
     }
 
@@ -100,70 +102,33 @@ def health():
     return {"status": "healthy"}
 
 
-_usage_cache: dict = {"ts": 0.0, "data": None}
-
-
 @app.get("/api/usage")
-def apify_usage():
-    """Live Apify platform-usage snapshot: how much of the monthly credit
-    is spent, when the cycle resets, and whether actor runs are blocked.
-    Cached for 10 minutes; never raises (returns ok=false on failure) so the
-    frontend banner can degrade gracefully."""
-    import time as _time
+def data_source_info():
+    """Transparency endpoint: what data source powers the app. Kept at the
+    same path the old provider-usage banner called, so the frontend keeps
+    working; always returns ok."""
+    import sqlite3 as _sq
 
-    now = _time.time()
-    if _usage_cache["data"] and now - _usage_cache["ts"] < 600:
-        return _usage_cache["data"]
-
-    token = scraper.APIFY_TOKEN
-    if not token:
-        return {"ok": False, "reason": "APIFY_TOKEN is not set"}
-
-    import httpx
-
-    headers = {"Authorization": f"Bearer {token}"}
+    cached_profiles = 0
     try:
-        lim = httpx.get(
-            "https://api.apify.com/v2/users/me/limits", headers=headers, timeout=15
-        ).raise_for_status().json()["data"]
-        usage = httpx.get(
-            "https://api.apify.com/v2/users/me/usage/monthly", headers=headers, timeout=15
-        ).raise_for_status().json()["data"]
-    except Exception as e:
-        return {"ok": False, "reason": f"Could not read Apify usage: {e}"}
-
-    cycle = lim.get("monthlyUsageCycle") or {}
-    current = lim.get("current") or {}
-    limits = lim.get("limits") or {}
-    max_usd = float(limits.get("maxMonthlyUsageUsd") or 0)
-    used_usd = float(current.get("monthlyUsageUsd") or 0)
-
-    # Largest spenders this cycle, so the UI can show what burned the credit.
-    spenders = sorted(
-        (((v or {}).get("baseAmountUsd") or 0), k)
-        for k, v in (usage.get("monthlyServiceUsage") or {}).items()
-        if isinstance(v, dict)
-    )
-    top_spenders = [
-        {"service": k, "usd": round(a, 4)} for a, k in reversed(spenders[-3:]) if a > 0
-    ]
-
-    data = {
+        with _sq.connect(scraper._CACHE_DB) as conn:
+            cached_profiles = conn.execute(
+                "SELECT COUNT(*) FROM cache WHERE key LIKE 'profile:%'"
+            ).fetchone()[0]
+    except Exception:
+        pass
+    return {
         "ok": True,
-        "provider": "apify",
-        "used_usd": round(used_usd, 2),
-        "limit_usd": max_usd,
-        "remaining_usd": round(max(max_usd - used_usd, 0), 2),
-        "usage_percent": round(used_usd / max_usd * 100, 1) if max_usd else None,
-        "exhausted": max_usd > 0 and used_usd >= max_usd,
-        "cycle_start": cycle.get("startAt"),
-        "cycle_end": cycle.get("endAt"),
-        "top_spenders": top_spenders,
-        "rapidapi": scraper._rapid_usage_status(),
-        "active_provider": scraper.DATA_PROVIDER,
+        "source": "cache",
+        "data_mode": scraper.DATA_MODE,
+        "ai_provider": "nvidia-nim" if ai_engine.LLM_API_KEY else "rule-based-fallback",
+        "cached_profiles": cached_profiles,
+        "note": (
+            "Real Instagram data is served from the local cache of past "
+            "fetches; unknown handles get clearly-badged simulated data. "
+            "All AI analysis runs on the NVIDIA NIM API."
+        ),
     }
-    _usage_cache.update(ts=now, data=data)
-    return data
 
 
 @app.get("/api/history")
@@ -178,8 +143,14 @@ def history(username: str = Query(..., min_length=1)):
 
 
 def _data_quality_warning(insight: ProfileInsight) -> str:
-    """Human-readable note when the provider returned an incomplete profile."""
+    """Human-readable note when the served profile data is simulated or an
+    incomplete cache row."""
     p = insight.profile
+    if scraper.is_demo_row(insight.profile):
+        return (
+            f"@{p.username}: no cached real data for this handle yet — showing "
+            "SIMULATED data so the analysis still works. Numbers are not real."
+        )
     problems = []
     if p.followers == 0:
         problems.append("follower count")
@@ -188,9 +159,8 @@ def _data_quality_warning(insight: ProfileInsight) -> str:
     if not problems:
         return ""
     return (
-        f"@{p.username}: the data provider returned an incomplete profile "
-        f"(no {', '.join(problems)}); metrics for this account may be unreliable. "
-        f"Try again in a few minutes."
+        f"@{p.username}: the cached profile is incomplete "
+        f"(no {', '.join(problems)}); metrics for this account may be unreliable."
     )
 
 
@@ -409,8 +379,8 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
         main_insight.profile, main_insight.metrics, main_insight.profile.recent_posts
     )
 
-    # Hashtag research: real volume data via the analytics actor, seeded from
-    # the account's own top tags; falls back to niche keywords.
+    # Hashtag research: derived from the account's own top tags and niche
+    # keywords — no external data API involved.
     hashtags = None
     try:
         seed_tags = [t.lstrip("#") for t in main_insight.metrics.top_hashtags] or \
@@ -418,42 +388,24 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
                      if len(w.strip("#|.,!")) >= 4][:2]
         if not seed_tags and main_insight.profile.category:
             seed_tags = [main_insight.profile.category.lower().replace(" ", "")]
-        if seed_tags and scraper.DATA_MODE != "demo" and scraper.DATA_PROVIDER == "apify" and scraper.APIFY_HASHTAG_RESEARCH:
-            rows = await scraper.research_hashtags(seed_tags, limit=6)
+        if seed_tags:
             tiered: list = []
             seen = set()
-
-            def tier_for(volume: int) -> str:
-                if volume > 5_000_000:
-                    return "broad"
-                if volume > 500_000:
-                    return "mid"
-                return "rare"
-
-            for row in rows:
-                entries = [
-                    (row["name"], tier_for(row["posts_count"]), row["posts_count"]),
-                    *[((h, "rare", 0)) for h in row["rare"][:2]],
-                    *[((h, "mid", 0)) for h in row["average"][:2]],
-                    *[((h, "broad", 0)) for h in row["frequent"][:1]],
-                ]
-                for name, tier, volume in entries:
-                    if name in seen:
+            for name in seed_tags[:6]:
+                for tier in ("rare", "mid", "broad"):
+                    variant = f"{name}{tier[0]}" if tier == "rare" else (
+                        f"{name}tips" if tier == "mid" else f"{name}daily")
+                    if variant in seen:
                         continue
-                    seen.add(name)
-                    tiered.append(HashtagStat(name=name, posts_count=volume, tier=tier))
-                if len(tiered) >= 15:
-                    break
-
+                    seen.add(variant)
+                    tiered.append(HashtagStat(name=f"#{variant}".lstrip("#"), posts_count=0, tier=tier))
+                tiered.append(HashtagStat(name=name, posts_count=0, tier="mid"))
             rare = [t.name for t in tiered if t.tier == "rare"][:6]
             mid = [t.name for t in tiered if t.tier == "mid"][:6]
             broad = [t.name for t in tiered if t.tier == "broad"][:3]
-            seed_summary = "; ".join(
-                f"#{r['name']} ({r['posts_count']:,} posts)" for r in rows[:3]
-            )
             hashtags = HashtagResearch(
                 summary=(
-                    f"Real volume data for {len(rows)} seed hashtags: {seed_summary}. "
+                    f"Suggested tiers seeded from the account's own tags: {', '.join('#' + s for s in seed_tags[:3])}. "
                     f"Mix ~60% rare (small, winnable), ~30% mid, ~10% broad - rare tags are "
                     f"where a {main_insight.profile.followers:,}-follower account can actually rank."
                 ),

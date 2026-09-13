@@ -432,10 +432,10 @@ export default function App() {
       <PWAInstallBanner />
 
       <footer className="footer-note">
-        {dataMode === 'live'
-          ? 'Data mode: live — real Instagram data served from cache; AI analysis by NVIDIA NIM.'
+        {dataMode === 'cache'
+          ? 'Data mode: cache — real cached Instagram data; all AI analysis by NVIDIA NIM.'
           : dataMode === 'demo'
-            ? 'Data mode: demo — simulated profiles. Configure a data provider and DATA_MODE=live in the backend for real data.'
+            ? 'Data mode: demo — simulated profiles for offline development.'
             : ''}
       </footer>
     </div>

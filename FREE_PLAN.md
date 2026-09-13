@@ -1,36 +1,34 @@
-# InstaIQ — The Never-Exhausts Free Plan
+# InstaIQ — The One-Key Free Plan
 
-No Instagram data provider on earth is truly unlimited for free. This app is
-architected so that **it never stops working** regardless of quota state:
+This app runs entirely on **one API key**: an NVIDIA NIM key (`nvapi-...`,
+free at build.nvidia.com) for all AI analysis. There are **no third-party
+Instagram data providers** — no Apify, no RapidAPI, no Meta Graph tokens,
+so nothing can ever hit a usage wall or expire.
 
-## The three safety layers (already built in)
+## Where the data comes from
 
-| Layer | What it does | Where |
+| Source | What | Freshness |
 |---|---|---|
-| 1. Cache-first | Every analysis is cached 24h (memory + SQLite disk). Re-analyzing the same account costs **zero** provider calls. | `scraper.py` |
-| 2. Provider failover | If the active provider is quota-dead, the app automatically tries any other configured provider (RapidAPI ↔ Apify ↔ Graph). | `_get_profile_uncached()` |
-| 3. Stale-but-real | If *all* providers are dead, known accounts still analyze instantly from their last real fetch (up to 30 days old), labeled with a `DATA n OLD` badge — never fake data, never an error. | `_disk_profile_get_any()` |
+| SQLite disk cache (`backend/profile_cache.db`) | Real Instagram data from past fetches — the app's source of truth | Fresh 7 days (`PROFILE_DISK_TTL`); served aged up to 30 days with a "data age" badge |
+| In-memory TTL cache | Instant repeats within a running backend | 30 minutes |
+| Demo generator | Unknown handles get deterministic **simulated** data, badged via `data_age_hours = -1` | n/a (never presented as real) |
 
-## Your free quota rhythm
+Competitor discovery mines the same cache (caption mentions, hashtag and
+category overlap), so full competitor research completes offline — the
+NVIDIA LLM picks rivals and writes the market research over cached numbers.
 
-| Provider | Free allowance | Resets |
-|---|---|---|
-| RapidAPI "Instagram Cheapest" | 30 calls/month ≈ 25–30 new accounts | Monthly on your subscribe date (~Oct 12) |
-| Apify free plan | $5/month ≈ 5 heavy research runs | Oct 9, then monthly |
+## Operating it
 
-Because repeat analyses are free, one month of normal use (a handful of new
-accounts + many re-checks) fits comfortably inside the renewing allowances.
-
-## How to operate it sustainably
-
-1. **Default provider stays `rapidapi`** — cheapest per analysis (1 call/profile).
-2. When RapidAPI runs dry mid-month, flip one line in `backend/.env`:
-   `DATA_PROVIDER=apify` (after Oct 9), then restart the backend.
-3. Nothing else to manage — failover + cache handle everything else.
-4. Never set `FALLBACK_TO_DEMO=true` unless you want fake data for UI demos.
+- `DATA_MODE=cache` (default): cached real data; unknown handles get
+  clearly-badged simulated data. **Never errors on quota.**
+- `DATA_MODE=demo`: everything simulated (UI work / demos).
+- `CACHE_DIR`/`PROFILE_CACHE_DB` can relocate the store; commit-friendly
+  caches are the user's choice — the file is git-ignored by default.
 
 ## Known limits (honesty section)
 
-- Fresh fetches for **brand-new** handles need at least one provider with quota.
-- RapidAPI discovery mines mentions/comments (≤8 enriched candidates per run).
-- Apify's hashtag-volume research stays off by default (`APIFY_HASHTAG_RESEARCH=false`).
+- Brand-new Instagram handles that were never fetched get simulated data
+  (clearly badged), not real numbers. Populate the cache by running the app
+  once with any data provider enabled, then remove the provider — the data
+  stays.
+- Trend detection uses the built-in archetype catalog over cached captions.
