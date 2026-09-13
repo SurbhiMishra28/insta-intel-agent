@@ -1057,11 +1057,11 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     if not still_missing:
         return result
 
-    # Cache-only safety net: when no Apify token is configured there is no
-    # live path for these handles — a doomed _run_actor_multi would hang for
-    # the full run timeout before erroring. Serve week-old REAL data instead
-    # (aged via data_age_hours) so rival research completes offline.
-    if not APIFY_TOKEN:
+    # Cache-only safety net: when NO provider has credentials there is no
+    # live path for these handles — a doomed fetch would hang/err for every
+    # handle. Serve week-old REAL data instead (aged via data_age_hours) so
+    # rival research completes offline.
+    if not (APIFY_TOKEN or RAPIDAPI_KEY or (GRAPH_ACCESS_TOKEN and GRAPH_IG_USER_ID)):
         for u in list(still_missing):
             stale = await asyncio.to_thread(_disk_profile_get_any, u)
             if stale is not None:
@@ -1745,23 +1745,50 @@ async def _fetch_via_provider(provider: str, username: str) -> ProfileData:
     return await _fetch_live_profile(username)
 
 
+def _provider_candidates() -> List[str]:
+    """Providers with credentials ACTUALLY configured, in priority order:
+    the configured DATA_PROVIDER first (when usable), then any other with
+    credentials. Prevents doomed attempts (e.g. DATA_PROVIDER=apify with no
+    token) from shadowing a working provider and polluting the error.
+    Empty list = no provider configured = cache-only operation."""
+    candidates: List[str] = []
+    if DATA_PROVIDER == "rapidapi" and RAPIDAPI_KEY:
+        candidates.append("rapidapi")
+    elif DATA_PROVIDER == "graph" and GRAPH_ACCESS_TOKEN and GRAPH_IG_USER_ID:
+        candidates.append("graph")
+    elif DATA_PROVIDER == "apify" and _apify_token_candidates():
+        candidates.append("apify")
+    # Failover: any other provider with credentials, in cost order.
+    if _apify_token_candidates() and "apify" not in candidates:
+        candidates.append("apify")
+    if RAPIDAPI_KEY and "rapidapi" not in candidates:
+        candidates.append("rapidapi")
+    if GRAPH_ACCESS_TOKEN and GRAPH_IG_USER_ID and "graph" not in candidates:
+        candidates.append("graph")
+    return candidates
+
+
 async def _get_profile_uncached(username: str) -> ProfileData:
     """Live/demo fetch with NO cache layers — called at most once per handle
     per TTL window thanks to the layers above.
 
-    Provider failover: the configured provider is tried first; if it fails
-    with a quota/auth/network error, any other provider with credentials
-    configured is tried before giving up (or falling back to demo)."""
+    Provider failover: providers with configured credentials are tried in
+    order; the first success wins. With no credentials anywhere, one clean
+    actionable error is raised (cached handles never reach this path)."""
     if DATA_MODE == "demo":
         return generate_demo_profile(username)
 
-    providers: List[str] = [DATA_PROVIDER]
-    if _apify_token_candidates() and "apify" not in providers:
-        providers.append("apify")
-    if RAPIDAPI_KEY and "rapidapi" not in providers:
-        providers.append("rapidapi")
-    if GRAPH_ACCESS_TOKEN and GRAPH_IG_USER_ID and "graph" not in providers:
-        providers.append("graph")
+    providers: List[str] = _provider_candidates()
+    if not providers:
+        raise RuntimeError(
+            "No Instagram data provider is configured and this handle isn't "
+            "cached yet. Cached accounts analyze instantly without any "
+            "provider; to fetch NEW handles add one of: APIFY_TOKEN (Apify, "
+            "renews monthly), RAPIDAPI_KEY (RapidAPI free tier: subscribe to "
+            "'Instagram Cheapest', 30 calls/month, no card), or "
+            "GRAPH_ACCESS_TOKEN + GRAPH_IG_USER_ID (free official Meta API) "
+            "to backend/.env — or set DATA_MODE=demo for simulated data."
+        )
 
     last_err: Optional[Exception] = None
     errors: List[str] = []
