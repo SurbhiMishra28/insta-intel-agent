@@ -24,7 +24,7 @@ shape, so the app works with no API key and never breaks because of an
 LLM/network failure.
 """
 import os
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -61,7 +61,8 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 # auth fails, and every chain quietly falls back to the same templates.
 if LLM_API_KEY.startswith("nvapi") and not LLM_BASE_URL:
     LLM_BASE_URL = "https://integrate.api.nvidia.com/v1"
-    LLM_MODEL = (os.getenv("LLM_MODEL", "") or "").strip() or "meta/llama-3.1-8b-instruct"
+    # gpt-oss-20b: current NIM default. (llama-3.1-8b reached EOL 2026-08.)
+    LLM_MODEL = (os.getenv("LLM_MODEL", "") or "").strip() or "openai/gpt-oss-20b"
 
 
 # ---------------------------------------------------------------------------
@@ -90,19 +91,39 @@ class CompetitorShortlist(BaseModel):
     rationale: str = Field(description="One or two sentences on why these were chosen")
 
 
+_LLM_CACHE: Dict[float, Any] = {}  # temperature -> shared client instance
+
+
 def _get_llm(temperature: float = LLM_TEMPERATURE):
-    """Returns a LangChain ChatOpenAI, or None when no key is configured."""
+    """Returns a shared LangChain ChatOpenAI, or None when no key is configured.
+
+    Latency guards:
+      - reasoning_effort=low for gpt-oss (else hidden thinking burns seconds)
+      - hard max_tokens cap (env LLM_MAX_TOKENS, default 1200) so no chain can
+        run away; outputs here are short JSON structures
+      - one client instance per temperature, reused across all chains
+    """
     if not LLM_API_KEY:
         return None
+    cached = _LLM_CACHE.get(temperature)
+    if cached is not None:
+        return cached
     from langchain_openai import ChatOpenAI
-    return ChatOpenAI(
+    extra = {"reasoning_effort": "low"} if "gpt-oss" in LLM_MODEL else {}
+    llm = ChatOpenAI(
         model=LLM_MODEL,
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL or None,
         temperature=temperature,
         max_retries=1,
-        timeout=90,
+        timeout=int(os.getenv("LLM_TIMEOUT", "45")),
+        # Bounds hidden reasoning + output; too small truncates the JSON and
+        # forces wasteful retries, too big lets a chain hog the request.
+        max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4000")),
+        model_kwargs=extra,
     )
+    _LLM_CACHE[temperature] = llm
+    return llm
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +258,24 @@ def _rule_based_summary(profile: ProfileData, m: ProfileMetrics) -> ProfileNarra
 
     recs.append(f"Lean into {m.best_content_type} format — it's already the top performer for this account.")
 
+    # Strengths must never render as an empty column — derive a real,
+    # data-grounded positive from whatever the sample does show.
+    if not strengths:
+        if m.follower_following_ratio >= 3:
+            strengths.append(
+                f"Healthy follower-to-following ratio ({m.follower_following_ratio:.1f}:1) signals an established, trusted account."
+            )
+        elif profile.followers >= 1000:
+            strengths.append(
+                f"A {profile.followers:,}-follower base is real distribution — every fix now compounds on it."
+            )
+        elif profile.recent_posts:
+            strengths.append(
+                "Early-stage account with a clean baseline: recent posts give the algorithm fresh signals to work with."
+            )
+        else:
+            strengths.append("Account is active and scannable — a consistent starting point to build cadence on.")
+
     if not weaknesses:
         weaknesses.append("No major weaknesses detected in the sampled data — focus shifts to scaling what already works.")
 
@@ -245,8 +284,50 @@ def _rule_based_summary(profile: ProfileData, m: ProfileMetrics) -> ProfileNarra
     )
 
 
-def analyze_profile(profile: ProfileData) -> ProfileInsight:
+_INSIGHT_MEMO: Dict[str, ProfileInsight] = {}  # bounded memo of computed insights
+
+
+def _insight_memo_key(profile: ProfileData) -> str:
+    """Cheap fingerprint: same handle + same data shape => same insight.
+    Makes multi-call pipelines (a rival analyzed twice by two code paths)
+    hit the memo instead of paying for a second LLM round-trip."""
+    first = profile.recent_posts[0] if profile.recent_posts else None
+    return "|".join(str(x) for x in (
+        profile.username, profile.followers, profile.posts_count,
+        len(profile.recent_posts), first.likes if first else 0,
+    ))
+
+
+_MARKET_MEMO: Dict[tuple, tuple] = {}  # key -> (timestamp, MarketResearch)
+_MARKET_MEMO_TTL = 3600  # rival sets change slowly; repeat runs are instant
+
+
+def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsight:
+    """Build a ProfileInsight.
+
+    use_llm=False returns the deterministic rule-based narrative instantly —
+    used for RIVALS in research pipelines (their metrics are what matter;
+    each LLM narrative costs ~20s on the free NVIDIA tier) and never writes
+    the memo, so full-quality runs are unaffected.
+    """
     metrics = compute_metrics(profile)
+
+    if not use_llm:
+        narrative = _rule_based_summary(profile, metrics)
+        return ProfileInsight(
+            profile=profile,
+            metrics=metrics,
+            ai_summary=narrative.summary,
+            strengths=narrative.strengths,
+            weaknesses=narrative.weaknesses,
+            recommendations=narrative.recommendations,
+        )
+
+    key = _insight_memo_key(profile)
+    hit = _INSIGHT_MEMO.get(key)
+    if hit is not None:
+        return hit
+
     narrative = _rule_based_summary(profile, metrics)
 
     llm = _get_llm()
@@ -261,7 +342,7 @@ def analyze_profile(profile: ProfileData) -> ProfileInsight:
         except Exception:
             pass  # keep the rule-based narrative on any LLM failure
 
-    return ProfileInsight(
+    insight = ProfileInsight(
         profile=profile,
         metrics=metrics,
         ai_summary=narrative.summary,
@@ -269,6 +350,10 @@ def analyze_profile(profile: ProfileData) -> ProfileInsight:
         weaknesses=narrative.weaknesses,
         recommendations=narrative.recommendations,
     )
+    _INSIGHT_MEMO[key] = insight
+    if len(_INSIGHT_MEMO) > 200:  # bounded
+        _INSIGHT_MEMO.pop(next(iter(_INSIGHT_MEMO)))
+    return insight
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +447,11 @@ def pick_competitors(main_profile: ProfileData, candidates: List[dict], count: i
     """Choose `count` competitor usernames from discovery candidates.
     Returns (usernames, rationale)."""
     count = max(1, min(count, 10))
+    # Fast path: nothing to choose — every candidate is wanted. Skips one
+    # full LLM round-trip (the most common cached-discovery case).
+    if len(candidates) <= count:
+        picked = [c.get("username") for c in candidates if c.get("username")][:count]
+        return picked, "All discovered candidates selected — every one matches the niche."
     llm = _get_llm(temperature=0.0)
     if llm is not None and candidates:
         try:
@@ -470,6 +560,16 @@ def _rule_based_market_research(main: ProfileInsight, competitors: List[ProfileI
 
 
 def build_market_research(main: ProfileInsight, competitors: List[ProfileInsight]) -> MarketResearch:
+    # Result cache: identical research computed recently returns instantly.
+    key = (
+        main.profile.username, main.metrics.engagement_rate, main.profile.followers,
+        tuple(sorted(c.profile.username for c in competitors)),
+    )
+    import time as _time
+    hit = _MARKET_MEMO.get(key)
+    if hit and (_time.time() - hit[0]) < _MARKET_MEMO_TTL:
+        return hit[1]
+
     research = _rule_based_market_research(main, competitors)
 
     llm = _get_llm()
@@ -499,6 +599,9 @@ def build_market_research(main: ProfileInsight, competitors: List[ProfileInsight
         except Exception:
             pass  # keep rule-based research on any LLM failure
 
+    _MARKET_MEMO[key] = (_time.time(), research)
+    if len(_MARKET_MEMO) > 100:
+        _MARKET_MEMO.pop(next(iter(_MARKET_MEMO)))
     return research
 
 
@@ -506,6 +609,11 @@ def build_market_summary(main: ProfileInsight, competitors: List[ProfileInsight]
     """Backward-compatible helper: (market_summary, competitive_gaps)."""
     research = build_market_research(main, competitors)
     return research.market_summary, research.competitive_gaps
+
+
+def analyze_profile_fast(profile: ProfileData) -> ProfileInsight:
+    """Rule-based-only analysis — no LLM call, microseconds. For rivals."""
+    return analyze_profile(profile, use_llm=False)
 
 
 # ---------------------------------------------------------------------------

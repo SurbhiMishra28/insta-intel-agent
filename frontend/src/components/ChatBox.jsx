@@ -220,7 +220,7 @@ export default function ChatBox({ context }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Ask a question…"
+              placeholder="Ask a question… or mention @handle / instagram URL for live data"
               rows={1}
               style={{
                 flex: 1,

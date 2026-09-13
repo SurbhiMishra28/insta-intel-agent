@@ -1,4 +1,14 @@
+// AI intelligence report: summary, strengths (always first), weaknesses,
+// then numbered recommendations.
+
 export default function Report({ insight }) {
+  const strengths = insight.strengths?.length
+    ? insight.strengths
+    : ['No distinct strengths detected in this sample yet — rescan after a few more posts.'];
+  const weaknesses = insight.weaknesses?.length
+    ? insight.weaknesses
+    : ['No major weaknesses detected in the sampled data.'];
+
   return (
     <div>
       <p className="report-summary">{insight.ai_summary}</p>
@@ -7,13 +17,13 @@ export default function Report({ insight }) {
         <div className="finding-col strengths">
           <h3>Strengths</h3>
           <ul className="finding-list">
-            {insight.strengths.map((s, i) => <li key={i}>{s}</li>)}
+            {strengths.map((s, i) => <li key={i}>{s}</li>)}
           </ul>
         </div>
         <div className="finding-col weaknesses">
           <h3>Weaknesses</h3>
           <ul className="finding-list">
-            {insight.weaknesses.map((s, i) => <li key={i}>{s}</li>)}
+            {weaknesses.map((s, i) => <li key={i}>{s}</li>)}
           </ul>
         </div>
       </div>

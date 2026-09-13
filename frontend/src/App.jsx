@@ -7,6 +7,7 @@ import GrowthPlanView from './components/GrowthPlan.jsx';
 import FollowerGrowthIcon from './components/FollowerGrowthIcon.jsx';
 import ResearchProgress from './components/ResearchProgress.jsx';
 import BestTimes from './components/BestTimes.jsx';
+import CadenceTimingMap from './components/CadenceTimingMap.jsx';
 import ReelsInsights from './components/ReelsInsights.jsx';
 import ExtrasGrid from './components/ExtrasGrid.jsx';
 import ReelTimingView from './components/ReelTiming.jsx';
@@ -19,13 +20,21 @@ import ChatBox from './components/ChatBox.jsx';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Client-side mirror of the backend's URL parser — purely for the live
+// "→ analyzing @handle" hint while typing. The backend stays the authority.
+function previewHandle(raw) {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  let m = t.match(/(?:instagram\.com|instagr\.am)\/([A-Za-z0-9._]+)/i);
+  if (!m) m = t.match(/ig\.me\/(?:m\/)?([A-Za-z0-9._]+)/i);
+  if (!m) m = t.match(/^@([A-Za-z0-9._]{2,30})$/);
+  return m ? m[1].toLowerCase() : '';
+}
+
 export default function App() {
-  const [mode, setMode] = useState('single'); // 'single' | 'compare' | 'growth' | 'trends'
+  const [mode, setMode] = useState('single'); // 'single' | 'competitors' | 'growth' | 'trends' | 'review' | 'whitespace'
   const [username, setUsername] = useState('');
-  const [competitors, setCompetitors] = useState(['', '']);
-  const [autoFind, setAutoFind] = useState(true);
   const [compCount, setCompCount] = useState(5);
-  const [includeCompetitors, setIncludeCompetitors] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null); // ProfileInsight | research response
@@ -39,14 +48,6 @@ export default function App() {
       .then((d) => setDataMode(d?.data_mode || ''))
       .catch(() => {});
   }, []);
-
-  const updateCompetitor = (idx, value) => {
-    setCompetitors((prev) => prev.map((c, i) => (i === idx ? value : c)));
-  };
-
-  const addCompetitorField = () => {
-    if (competitors.length < 10) setCompetitors((prev) => [...prev, '']);
-  };
 
   const runAnalysis = async (e) => {
     e.preventDefault();
@@ -109,45 +110,24 @@ export default function App() {
         });
         if (!res.ok) throw new Error((await res.json()).detail || 'Whitespace analysis failed');
         setResult(await res.json());
-      } else if (mode === 'single' && !includeCompetitors) {
-        // Just the one profile, no competitor research.
+      } else if (mode === 'competitors') {
+        // Auto-find + research the account's real competitors, with market
+        // research (ranking, gaps, opportunities) on top.
+        const res = await fetch(`${API_URL}/api/competitor-research?count=${compCount}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username.trim() }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || 'Competitor research failed');
+        setResult(await res.json());
+      } else {
+        // Default: single-profile analysis.
         const res = await fetch(`${API_URL}/api/analyze`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ username: username.trim() }),
         });
         if (!res.ok) throw new Error((await res.json()).detail || 'Analysis failed');
-        setResult(await res.json());
-      } else if (mode === 'single') {
-        // Full pipeline: profile + auto-found, deeply researched competitors.
-        const res = await fetch(`${API_URL}/api/competitor-research?count=5`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: username.trim() }),
-        });
-        if (!res.ok) throw new Error((await res.json()).detail || 'Research failed');
-        setResult(await res.json());
-      } else if (autoFind) {
-        const res = await fetch(`${API_URL}/api/competitor-research?count=${compCount}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: username.trim() }),
-        });
-        if (!res.ok) throw new Error((await res.json()).detail || 'Research failed');
-        setResult(await res.json());
-      } else {
-        const list = competitors.map((c) => c.trim()).filter(Boolean);
-        if (list.length === 0) {
-          setError('Add at least one competitor handle to compare against.');
-          setLoading(false);
-          return;
-        }
-        const res = await fetch(`${API_URL}/api/compare`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ main_username: username.trim(), competitor_usernames: list }),
-        });
-        if (!res.ok) throw new Error((await res.json()).detail || 'Comparison failed');
         setResult(await res.json());
       }
     } catch (err) {
@@ -163,17 +143,16 @@ export default function App() {
   const rivals = result?.competitors || [];
   const hasRivals = rivals.length > 0;
   const allInsights = mainInsight ? [mainInsight, ...rivals] : [];
-  const researching = loading && (mode === 'compare' || mode === 'growth' || (mode === 'single' && includeCompetitors));
+  const researching = loading && (mode === 'competitors' || mode === 'growth');
 
   return (
     <div className="app-shell">
       <header className="hero">
         <div className="hero-eyebrow"><span className="dot" />InstaIQ · AI Intelligence Agent</div>
-        <h1>Read any Instagram account like an analyst would.</h1>
-        <p className="sub">
+        <h1>Read any Instagram account like an analyst would.</h1>        <p className="sub">
           Enter a handle to get engagement benchmarks, content patterns, and
-          AI-written strategy notes — with competitors found and researched
-          for you automatically.
+          AI-written strategy notes — plus growth plans, timing maps, and
+          trend detection grounded in real data.
         </p>
 
         <form className="scanner" onSubmit={runAnalysis}>
@@ -181,8 +160,8 @@ export default function App() {
             <button type="button" className={mode === 'single' ? 'active' : ''} onClick={() => setMode('single')}>
               Analyze one profile
             </button>
-            <button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => setMode('compare')}>
-              Compare vs competitors
+            <button type="button" className={mode === 'competitors' ? 'active' : ''} onClick={() => setMode('competitors')}>
+              Competitor research
             </button>
             <button type="button" className={mode === 'growth' ? 'active' : ''} onClick={() => setMode('growth')} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               Growth plan <FollowerGrowthIcon size={13} />
@@ -202,7 +181,7 @@ export default function App() {
             <span className="scanner-prefix">@</span>
             <input
               type="text"
-              placeholder="handle or instagram.com/username"
+              placeholder="paste an instagram.com/username URL — or type a handle"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
@@ -211,59 +190,23 @@ export default function App() {
             </button>
           </div>
 
-          {mode === 'single' && (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#9CA1A6', cursor: 'pointer', margin: '8px 0 4px' }}>
-              <input
-                type="checkbox"
-                checked={includeCompetitors}
-                onChange={(e) => setIncludeCompetitors(e.target.checked)}
-              />
-              Also find &amp; benchmark 5 competitors for this account
+          {username.trim() && /instagram\.com|instagr\.am|ig\.me|https?:\/\//i.test(username) && (
+            <p style={{ margin: 0, fontSize: 12.5, color: 'var(--signal)', fontFamily: 'var(--font-display)' }}>
+              → analyzing @{previewHandle(username) || '…'}
+            </p>
+          )}
+
+          {mode === 'competitors' && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#9CA1A6', margin: '8px 0 4px' }}>
+              How many competitors to research:
+              <select
+                value={compCount}
+                onChange={(e) => setCompCount(Number(e.target.value))}
+                style={{ background: 'transparent', color: '#E8EAED', border: '1px solid #3A3F45', borderRadius: 4, padding: '2px 6px' }}
+              >
+                {[3, 4, 5, 6, 7, 8, 9, 10].map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
             </label>
-          )}
-
-          {mode === 'compare' && (
-            <div style={{ display: 'flex', gap: 16, alignItems: 'center', margin: '8px 0 4px', flexWrap: 'wrap' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#9CA1A6', cursor: 'pointer' }}>
-                <input type="checkbox" checked={autoFind} onChange={(e) => setAutoFind(e.target.checked)} />
-                Auto-find competitors for me
-              </label>
-              {autoFind && (
-                <label style={{ fontSize: 13, color: '#9CA1A6' }}>
-                  How many:{' '}
-                  <select
-                    value={compCount}
-                    onChange={(e) => setCompCount(Number(e.target.value))}
-                    style={{ background: 'transparent', color: '#E8EAED', border: '1px solid #3A3F45', borderRadius: 4, padding: '2px 6px' }}
-                  >
-                    {[5, 6, 7, 8, 9, 10].map((n) => <option key={n} value={n}>{n}</option>)}
-                  </select>
-                </label>
-              )}
-            </div>
-          )}
-
-          {mode === 'compare' && !autoFind && (
-            <div className="competitor-inputs">
-              {competitors.map((c, idx) => (
-                <input
-                  key={idx}
-                  type="text"
-                  placeholder={`competitor ${idx + 1} handle`}
-                  value={c}
-                  onChange={(e) => updateCompetitor(idx, e.target.value)}
-                />
-              ))}
-              {competitors.length < 10 && (
-                <button
-                  type="button"
-                  onClick={addCompetitorField}
-                  style={{ background: 'none', border: 'none', color: '#9CA1A6', fontSize: 13, textAlign: 'left', padding: '4px 0' }}
-                >
-                  + add another competitor
-                </button>
-              )}
-            </div>
           )}
 
           {error && <p className="error-line">{error}</p>}
@@ -276,7 +219,7 @@ export default function App() {
  />
       )}
 
-      {result && mode === 'single' && !hasRivals && (
+      {result && mode === 'single' && (
         <>
           <section className="section">
             <p className="section-label">Profile readout</p>
@@ -286,6 +229,84 @@ export default function App() {
             <p className="section-label">AI intelligence report</p>
             <Report insight={mainInsight} />
           </section>
+        </>
+      )}
+
+      {result && mode === 'competitors' && hasRivals && mainInsight && (
+        <>
+          <section className="section">
+            <p className="section-label">Profile readout</p>
+            <ProfileReadout insight={mainInsight} />
+          </section>
+
+          <section className="section">
+            <p className="section-label">
+              Competitive ranking
+              {result.candidates_found ? ` — ${result.candidates_found} candidates discovered` : ''}
+            </p>
+            {result.selection_rationale && (
+              <p className="report-summary" style={{ marginBottom: 10 }}>{result.selection_rationale}</p>
+            )}
+            <RankingBars ranking={result.ranking} allInsights={allInsights} mainUsername={mainInsight.profile.username} />
+          </section>
+
+          <section className="section">
+            <p className="section-label">Engagement rate vs. competitors</p>
+            <EngagementChart allInsights={allInsights} mainUsername={mainInsight.profile.username} />
+          </section>
+
+          {result.market_summary && (
+            <section className="section">
+              <p className="section-label">Market summary</p>
+              <p className="report-summary">{result.market_summary}</p>
+              {result.competitive_gaps?.length > 0 && (
+                <>
+                  <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, margin: '0 0 4px' }}>Competitive gaps</h3>
+                  <ul className="gap-list">
+                    {result.competitive_gaps.map((g, i) => <li key={i}>{g}</li>)}
+                  </ul>
+                </>
+              )}
+            </section>
+          )}
+
+          {result.content_gaps?.length > 0 && (
+            <section className="section">
+              <p className="section-label">Content gaps rivals own</p>
+              <ul className="gap-list">
+                {result.content_gaps.map((g, i) => <li key={i}>{g}</li>)}
+              </ul>
+            </section>
+          )}
+
+          {result.opportunities?.length > 0 && (
+            <section className="section">
+              <p className="section-label">Opportunities for you</p>
+              <ul className="gap-list">
+                {result.opportunities.map((g, i) => <li key={i}>{g}</li>)}
+              </ul>
+            </section>
+          )}
+
+          <section className="section">
+            <p className="section-label">Your intelligence report</p>
+            <Report insight={mainInsight} />
+          </section>
+
+          {result.warnings?.length > 0 && (
+            <div className="section">
+              <p className="error-line">
+                {result.warnings.map((w, i) => <span key={i} style={{ display: 'block' }}>{w}</span>)}
+              </p>
+            </div>
+          )}
+
+          {rivals.map((c) => (
+            <div className="competitor-block" key={c.profile.username}>
+              <p className="section-label">@{c.profile.username} — competitor readout</p>
+              <ProfileReadout insight={c} />
+            </div>
+          ))}
         </>
       )}
 
@@ -313,6 +334,13 @@ export default function App() {
             <section className="section">
               <p className="section-label">Best time to post (from real post timestamps)</p>
               <BestTimes bestTimes={result.best_times} />
+            </section>
+          )}
+
+          {result.cadence_map && (
+            <section className="section">
+              <p className="section-label">Posting cadence &amp; timing map</p>
+              <CadenceTimingMap cadenceMap={result.cadence_map} />
             </section>
           )}
 
@@ -353,78 +381,6 @@ export default function App() {
               />
             </section>
           )}
-        </>
-      )}
-
-      {result && hasRivals && mode !== 'growth' && (
-        <>
-          <section className="section">
-            <p className="section-label">Profile readout</p>
-            <ProfileReadout insight={mainInsight} />
-          </section>
-
-          <section className="section">
-            <p className="section-label">
-              Competitive ranking
-              {result.candidates_found ? ` — ${result.candidates_found} candidates discovered` : ''}
-            </p>
-            {result.selection_rationale && (
-              <p className="report-summary" style={{ marginBottom: 10 }}>{result.selection_rationale}</p>
-            )}
-            <RankingBars ranking={result.ranking} allInsights={allInsights} mainUsername={mainInsight.profile.username} />
-          </section>
-
-          <section className="section">
-            <p className="section-label">Engagement rate vs. competitors</p>
-            <EngagementChart allInsights={allInsights} mainUsername={mainInsight.profile.username} />
-          </section>
-
-          <section className="section">
-            <p className="section-label">Market summary</p>
-            <p className="report-summary">{result.market_summary}</p>
-            <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, margin: '0 0 4px' }}>Competitive gaps</h3>
-            <ul className="gap-list">
-              {result.competitive_gaps.map((g, i) => <li key={i}>{g}</li>)}
-            </ul>
-          </section>
-
-          {result.content_gaps?.length > 0 && (
-            <section className="section">
-              <p className="section-label">Content gaps rivals own</p>
-              <ul className="gap-list">
-                {result.content_gaps.map((g, i) => <li key={i}>{g}</li>)}
-              </ul>
-            </section>
-          )}
-
-          {result.opportunities?.length > 0 && (
-            <section className="section">
-              <p className="section-label">Opportunities for you</p>
-              <ul className="gap-list">
-                {result.opportunities.map((g, i) => <li key={i}>{g}</li>)}
-              </ul>
-            </section>
-          )}
-
-          <section className="section">
-            <p className="section-label">Your intelligence report</p>
-            <Report insight={mainInsight} />
-          </section>
-
-          {result.warnings?.length > 0 && (
-            <div className="section">
-              <p className="error-line">
-                {result.warnings.map((w, i) => <span key={i} style={{ display: 'block' }}>{w}</span>)}
-              </p>
-            </div>
-          )}
-
-          {rivals.map((c) => (
-            <div className="competitor-block" key={c.profile.username}>
-              <p className="section-label">@{c.profile.username} — competitor readout</p>
-              <ProfileReadout insight={c} />
-            </div>
-          ))}
         </>
       )}
 
@@ -477,9 +433,9 @@ export default function App() {
 
       <footer className="footer-note">
         {dataMode === 'live'
-          ? 'Data mode: live — real public Instagram data via the Apify data provider.'
+          ? 'Data mode: live — real Instagram data served from cache; AI analysis by NVIDIA NIM.'
           : dataMode === 'demo'
-            ? 'Data mode: demo — simulated profiles. Set APIFY_TOKEN + DATA_MODE=live in the backend for real data.'
+            ? 'Data mode: demo — simulated profiles. Configure a data provider and DATA_MODE=live in the backend for real data.'
             : ''}
       </footer>
     </div>

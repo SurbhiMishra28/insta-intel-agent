@@ -14,6 +14,23 @@ export default function ProfileReadout({ insight }) {
         <p className="handle">
           @{profile.username}
           {profile.is_verified && <span className="badge">VERIFIED</span>}
+          {profile.data_age_hours != null && (
+            <span
+              title={`Live providers were unavailable — showing the last real fetch for this account (${profile.data_age_hours}h ago)`}
+              style={{
+                marginLeft: 6,
+                fontSize: 10,
+                fontWeight: 700,
+                color: '#0F1115',
+                background: '#E6AA28',
+                borderRadius: 8,
+                padding: '2px 7px',
+                verticalAlign: 'middle',
+              }}
+            >
+              DATA {profile.data_age_hours >= 48 ? `${Math.round(profile.data_age_hours / 24)}d` : `${Math.round(profile.data_age_hours)}h`} OLD
+            </span>
+          )}
         </p>
         <p className="category">{profile.category}</p>
         <p className="bio">{profile.bio}</p>

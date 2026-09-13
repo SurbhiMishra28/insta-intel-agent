@@ -27,7 +27,8 @@ class ProfileData(BaseModel):
     is_verified: bool
     is_business: bool
     category: Optional[str] = None
-    recent_posts: List[Post] = []
+    recent_posts: List[Post]
+    data_age_hours: Optional[float] = None  # set when serving stale cached data = []
 
 
 class ProfileMetrics(BaseModel):
@@ -122,6 +123,7 @@ class GrowthPlanResponse(BaseModel):
     rivals: List[ProfileInsight] = []  # researched competitors used as grounding (if any)
     warnings: List[str] = []
     best_times: Optional["BestTimes"] = None
+    cadence_map: Optional["CadenceMap"] = None
     reels: Optional["ReelsInsights"] = None
     bio: Optional["BioOptimizer"] = None
     hashtags: Optional["HashtagResearch"] = None
@@ -141,6 +143,25 @@ class BestTimeSlot(BaseModel):
 class BestTimes(BaseModel):
     slots: List[BestTimeSlot] = []
     summary: str
+    enough_data: bool = True
+
+
+class CadenceCell(BaseModel):
+    day: str            # Mon..Sun
+    hour: int           # 0-21, start of a 3-hour UTC slot
+    engagement: float   # avg likes+comments of posts in this cell
+    samples: int
+
+
+class CadenceMap(BaseModel):
+    """Posting cadence + weekday×hour timing map built from real timestamps."""
+    posts_per_week: float = 0
+    sample_days: float = 0          # days covered by the fetched posts
+    active_days: List[str] = []     # weekdays with at least one post
+    longest_gap_days: float = 0     # biggest silent stretch in the sample
+    heatmap: List[CadenceCell] = []
+    strongest_cell: Optional[CadenceCell] = None
+    summary: str = ""
     enough_data: bool = True
 
 

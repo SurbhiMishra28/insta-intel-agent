@@ -21,3 +21,6 @@ backend/uvicorn.log
 frontend/vite.log
 backend/scan_history.db
 backend/profile_cache.db
+backend/insta_cache.db
+backend/_t*.json
+backend/_verify_*.json

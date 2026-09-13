@@ -109,17 +109,56 @@ def test_iso_timestamp():
 
 
 async def test_missing_token_error():
-    saved = scraper.APIFY_TOKEN
-    scraper.APIFY_TOKEN = ""  # simulate missing token
+    saved_token = scraper.APIFY_TOKEN
+    saved_rapid = scraper.RAPIDAPI_KEY
+    saved_graph_token = scraper.GRAPH_ACCESS_TOKEN
+    saved_graph_id = scraper.GRAPH_IG_USER_ID
+    saved_fallback = scraper.FALLBACK_TO_DEMO
     try:
-        await scraper.get_profile("cristiano")
-    except RuntimeError as e:
-        assert "APIFY_TOKEN" in str(e), str(e)
-        print("missing-token error: OK")
-    else:
-        raise AssertionError("expected RuntimeError about APIFY_TOKEN")
+        # Clear ALL caches (in-memory + disk) so we hit the fetch path.
+        scraper._profile_cache.clear()
+        scraper._inflight.clear()
+        import sqlite3
+        conn = sqlite3.connect(scraper._CACHE_DB)
+        conn.execute('DELETE FROM cache WHERE key LIKE "profile:cristiano%"')
+        conn.commit()
+        conn.close()
+
+        # With FALLBACK_TO_DEMO=true (the default), a missing token
+        # falls back to demo data — never errors.
+        scraper.APIFY_TOKEN = ""
+        scraper.FALLBACK_TO_DEMO = True
+        profile = await scraper.get_profile("cristiano")
+        assert profile.username == "cristiano", f"expected 'cristiano', got {profile.username}"
+        print("missing-token fallback to demo: OK")
+
+        # Clear caches again so the second test doesn't hit disk cache.
+        scraper._profile_cache.clear()
+        scraper._inflight.clear()
+        conn = sqlite3.connect(scraper._CACHE_DB)
+        conn.execute('DELETE FROM cache WHERE key LIKE "profile:cristiano%"')
+        conn.commit()
+        conn.close()
+
+        # With FALLBACK_TO_DEMO=false and NO provider credentials at all,
+        # the fetch must raise.
+        scraper.FALLBACK_TO_DEMO = False
+        scraper.RAPIDAPI_KEY = ""
+        scraper.GRAPH_ACCESS_TOKEN = ""
+        scraper.GRAPH_IG_USER_ID = ""
+        try:
+            await scraper.get_profile("cristiano")
+        except RuntimeError as e:
+            assert "APIFY_TOKEN" in str(e) or "All data providers failed" in str(e), str(e)
+            print("no-provider error (no fallback): OK")
+        else:
+            raise AssertionError("expected RuntimeError when no provider is configured")
     finally:
-        scraper.APIFY_TOKEN = saved
+        scraper.APIFY_TOKEN = saved_token
+        scraper.RAPIDAPI_KEY = saved_rapid
+        scraper.GRAPH_ACCESS_TOKEN = saved_graph_token
+        scraper.GRAPH_IG_USER_ID = saved_graph_id
+        scraper.FALLBACK_TO_DEMO = saved_fallback
 
 
 async def test_cache():

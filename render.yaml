@@ -14,7 +14,7 @@ services:
         value: "3.13.4"
       - key: DATA_MODE
         value: live
-      # When Apify credits run out (402/401), serve deterministic demo data
+      # When data-provider credits run out, serve deterministic demo data
       # instead of erroring — auto-recovers when credits renew.
       - key: FALLBACK_TO_DEMO
         value: "true"
@@ -22,7 +22,28 @@ services:
       # (marked sync:false so the blueprint never hardcodes them).
       - key: APIFY_TOKEN
         sync: false
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: GRAPH_ACCESS_TOKEN
+        sync: false
+      - key: GRAPH_IG_USER_ID
+        sync: false
       - key: LLM_API_KEY
         sync: false
       - key: LLM_BASE_URL
         sync: false
+
+  - type: web
+    name: instaiq-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      # The static frontend calls the backend service directly.
+      - key: VITE_API_URL
+        value: https://instaiq-backend.onrender.com

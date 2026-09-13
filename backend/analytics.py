@@ -16,6 +16,8 @@ from typing import List, Optional
 from models import (
     BestTimeSlot,
     BestTimes,
+    CadenceCell,
+    CadenceMap,
     BioOptimizer,
     HashtagSuggestion,
     HashtagSuggestionResult,
@@ -83,6 +85,106 @@ def compute_best_times(insight: ProfileInsight) -> BestTimes:
         f"({worst.avg_engagement:,.0f}). Times are UTC - shift to your audience's timezone."
     )
     return BestTimes(slots=slots, summary=summary, enough_data=True)
+
+
+# ---------------------------------------------------------------------------
+# Posting cadence + weekday×hour timing map (from real timestamps)
+# ---------------------------------------------------------------------------
+
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def compute_cadence_map(insight: ProfileInsight) -> CadenceMap:
+    """Deterministic cadence + timing map from the account's real posts.
+
+    - heatmap: avg engagement per weekday × 3-hour UTC slot
+    - cadence: posts/week over the sample span, active weekdays, and the
+      longest silent stretch (a consistency signal)
+    """
+    posts = [p for p in insight.profile.recent_posts if p.posted_at]
+    if len(posts) < 3:
+        return CadenceMap(
+            summary=(
+                "Not enough timestamped posts for a cadence map — at least 3 "
+                "posts with timestamps are needed (fetch again once more posts exist)."
+            ),
+            enough_data=False,
+        )
+
+    parsed: List[tuple] = []
+    for p in posts:
+        try:
+            dt = datetime.fromisoformat(p.posted_at)
+        except (TypeError, ValueError):
+            continue
+        parsed.append((dt, p.likes + p.comments))
+    if len(parsed) < 3:
+        return CadenceMap(
+            summary="Post timestamps could not be parsed — cadence map unavailable.",
+            enough_data=False,
+        )
+
+    # --- Cadence over the sample span (newest minus oldest post) ---
+    times = [dt for dt, _ in parsed]
+    span_days = max((max(times) - min(times)).total_seconds() / 86400, 0.5)
+    posts_per_week = round(len(parsed) / span_days * 7, 1)
+
+    active_days = sorted({_DAY_NAMES[dt.weekday()] for dt, _ in parsed}, key=_DAY_NAMES.index)
+
+    # Longest gap between consecutive posts (in days), a consistency signal.
+    gaps = [
+        round((b - a).total_seconds() / 86400, 1)
+        for a, b in zip(sorted(times), sorted(times)[1:])
+    ]
+    longest_gap = max(gaps) if gaps else 0.0
+
+    # --- Weekday × 3-hour-slot heatmap ---
+    buckets: dict = {}
+    for dt, eng in parsed:
+        day = _DAY_NAMES[dt.weekday()]
+        slot = (dt.hour // 3) * 3
+        buckets.setdefault((day, slot), []).append(eng)
+
+    heatmap: List[CadenceCell] = []
+    for (day, slot), engs in buckets.items():
+        heatmap.append(CadenceCell(
+            day=day, hour=slot,
+            engagement=round(sum(engs) / len(engs), 1),
+            samples=len(engs),
+        ))
+
+    strongest = max(heatmap, key=lambda c: c.engagement, default=None)
+
+    # --- Summary ---
+    freq_note = (
+        f"Posts ~{posts_per_week}/week"
+        if posts_per_week >= 1 else
+        f"Posts ~{round(7 / max(posts_per_week, 0.1))}-day gaps"
+    )
+    gap_note = (
+        f"; longest silent stretch {longest_gap:.0f} days" if longest_gap >= 2 else ""
+    )
+    best_note = (
+        f" Strongest window: {strongest.day} {strongest.hour:02d}-{strongest.hour + 3:02d} UTC "
+        f"({strongest.engagement:,.0f} avg engagement, {strongest.samples} post(s))."
+        if strongest else ""
+    )
+    summary = (
+        f"{freq_note} across {len(active_days)} of 7 weekdays{gap_note}. "
+        "Times are UTC — shift to your audience's timezone."
+        + best_note
+    )
+    heatmap.sort(key=lambda c: (-c.engagement, c.day, c.hour))
+    return CadenceMap(
+        posts_per_week=posts_per_week,
+        sample_days=round(span_days, 1),
+        active_days=active_days,
+        longest_gap_days=longest_gap,
+        heatmap=heatmap,
+        strongest_cell=strongest,
+        summary=summary,
+        enough_data=True,
+    )
 
 
 # ---------------------------------------------------------------------------
