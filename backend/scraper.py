@@ -1074,6 +1074,55 @@ def is_demo_row(profile: ProfileData) -> bool:
     return profile.data_age_hours == -1
 
 
+def _cached_profile_pool_sync(exclude: set, limit: int) -> List[Dict[str, Any]]:
+    """Snapshot of every REAL account in the disk cache (within the profile
+    TTL), shaped like discovery candidates. Used as a fallback rival pool
+    when auto-discovery has nothing to offer — comparative readouts stay
+    grounded in real data instead of dead-ending."""
+    try:
+        with _cache_conn() as conn:
+            rows = conn.execute(
+                "SELECT key, value, cached_at FROM cache WHERE key LIKE 'profile:%'"
+                " ORDER BY cached_at DESC",
+            ).fetchall()
+    except Exception:
+        return []
+    now = time.time()
+    out: List[Dict[str, Any]] = []
+    for key, value, ts in rows:
+        handle = key.split(":", 1)[1].strip().lower()
+        if not handle or handle in exclude or handle in {o["username"] for o in out}:
+            continue
+        if now - ts > _DISK_TTL_PROFILE:
+            continue
+        try:
+            d = json.loads(value)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        out.append({
+            "username": handle,
+            "full_name": d.get("full_name") or "",
+            "bio": (d.get("bio") or "")[:160],
+            "followers": d.get("followers") or 0,
+            "verified": bool(d.get("is_verified")),
+            "private": False,
+        })
+        if len(out) >= max(limit, 1):
+            break
+    return out
+
+
+async def get_cached_profile_pool(exclude: Optional[set] = None, limit: int = 30) -> List[Dict[str, Any]]:
+    """Async wrapper: real accounts already cached in this app, freshest
+    first. Never raises; empty list means the cache has nothing usable."""
+    try:
+        return await asyncio.to_thread(_cached_profile_pool_sync, set(exclude or ()), limit)
+    except Exception:
+        return []
+
+
 async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     """Fetch several profiles at once. In live mode the missing handles are
     fetched in a SINGLE actor run. Returns a map of lower-cased username ->

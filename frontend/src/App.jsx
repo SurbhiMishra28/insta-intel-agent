@@ -301,6 +301,17 @@ export default function App() {
             </div>
           )}
 
+          {!hasRivals && (
+            <section className="section">
+              <p className="section-label">No rivals found yet</p>
+              <p className="report-summary">
+                We couldn&apos;t find comparable accounts for this profile yet. Run an
+                analysis on a few similar accounts in your niche — once they&apos;re in the
+                app, competitor research will target them automatically.
+              </p>
+            </section>
+          )}
+
           {rivals.map((c) => (
             <div className="competitor-block" key={c.profile.username}>
               <p className="section-label">@{c.profile.username} — competitor readout</p>

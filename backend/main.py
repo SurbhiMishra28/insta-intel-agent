@@ -196,23 +196,36 @@ async def _research_competitors(main_username: str, main_profile: ProfileData, c
     wave computing the main + every rival's narrative concurrently -> done.
     Returns (main_insight, insights, warnings, candidates_found, rationale).
     """
+    fallback_note: Optional[str] = None
     try:
         candidates = await scraper.discover_related_profiles(main_username, limit=30)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        # Live provider unavailable (quota, token, network) — don't dead-end:
+        # degrade to cached real rivals instead of failing the request.
+        fallback_note = f"Auto-discovery unavailable ({e}) — using accounts already analyzed in this app as approximate rivals."
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not discover competitors: {e}")
+        fallback_note = f"Auto-discovery failed ({e}) — using accounts already analyzed in this app as approximate rivals."
 
     if not candidates:
-        raise HTTPException(
-            status_code=404,
-            detail=(
+        try:
+            main_uname = scraper.normalize_username(main_username)
+        except ValueError:
+            main_uname = (main_username or "").strip().lstrip("@").lower()
+        candidates = await scraper.get_cached_profile_pool(exclude={main_uname}, limit=30)
+        if candidates and not fallback_note:
+            fallback_note = (
+                "No niche-specific competitors could be discovered for this account yet "
+                "— showing the closest available rivals from accounts already analyzed "
+                "in this app instead. Analyze a few niche rivals once and research will "
+                "target them specifically."
+            )
+        if not candidates:
+            fallback_note = (
                 f"No competitor candidates for @{main_username} yet — rivals are mined from "
                 "accounts already analyzed in this app. Analyze this account and a few "
                 "niche rivals once; after that, competitor research runs fully offline "
                 "with the NVIDIA AI doing the selection and the analysis over cached real data."
-            ),
-        )
+            )
 
     # Parallelize the two slow steps: rival selection (LLM) and the main
     # account's own narrative (LLM) are independent — run them CONCURRENTLY
@@ -239,6 +252,8 @@ async def _research_competitors(main_username: str, main_profile: ProfileData, c
         f"@{u}: no data returned (profile may be private or unavailable)."
         for u in picked if profiles.get(u.lower()) is None
     ]
+    if fallback_note:
+        warnings.insert(0, fallback_note)
 
     # Rivals via the INSTANT rule-based path — their numbers (ER, cadence,
     # followers), which drive ranking and gap analysis, are identical; the
@@ -273,9 +288,19 @@ async def competitor_research(req: AnalyzeRequest, count: int = Query(5, ge=1, l
     warnings = [w for w in [_data_quality_warning(main_insight)] + extra_warnings if w]
 
     if not competitor_insights:
-        raise HTTPException(
-            status_code=502,
-            detail="; ".join(warnings) or "Could not fetch any competitor profiles.",
+        # Rivals were picked but none returned data — return the main
+        # account alone with honest warnings instead of dead-ending.
+        return CompetitorResearchResponse(
+            main=main_insight,
+            competitors=[],
+            market_summary="",
+            competitive_gaps=[],
+            content_gaps=[],
+            opportunities=[],
+            selection_rationale=rationale or "No rival data available.",
+            ranking=[main_insight.profile.username],
+            warnings=warnings,
+            candidates_found=candidates_found,
         )
 
     research = await _llm_call(ai_engine.build_market_research, main_insight, competitor_insights)
@@ -487,12 +512,24 @@ async def compare(req: CompareRequest):
     else:
         # No handles given: auto-discover competitors instead. The main
         # narrative joins the same parallel wave inside the helper.
-        main_insight, competitor_insights, extra_warnings, _, rationale = await _research_competitors(
-            req.main_username, main_profile, 5
-        )
-        competitor_errors.extend(extra_warnings)
+        try:
+            main_insight, competitor_insights, extra_warnings, _, rationale = await _research_competitors(
+                req.main_username, main_profile, 5
+            )
+            competitor_errors.extend(extra_warnings)
+        except HTTPException as e:
+            # Discovery/fetch hard-failed (e.g. provider quota) — degrade to
+            # a main-only comparison instead of a dead-end error.
+            competitor_errors.append(str(e.detail))
+            main_insight = await _analyze_one(main_profile)
+            competitor_insights = []
+            rationale = "No rival data available."
 
-    research = await _llm_call(ai_engine.build_market_research, main_insight, competitor_insights)
+    if competitor_insights:
+        research = await _llm_call(ai_engine.build_market_research, main_insight, competitor_insights)
+    else:
+        # No rival data anywhere — main-only response, no LLM market call.
+        research = None
 
     all_insights = [main_insight] + competitor_insights
     ranking = [
@@ -503,10 +540,10 @@ async def compare(req: CompareRequest):
     return CompareResponse(
         main=main_insight,
         competitors=competitor_insights,
-        market_summary=research.market_summary,
-        competitive_gaps=research.competitive_gaps,
-        content_gaps=research.content_gaps,
-        opportunities=research.opportunities,
+        market_summary=research.market_summary if research else "",
+        competitive_gaps=research.competitive_gaps if research else [],
+        content_gaps=research.content_gaps if research else [],
+        opportunities=research.opportunities if research else [],
         selection_rationale=rationale,
         ranking=ranking,
         warnings=competitor_errors,
