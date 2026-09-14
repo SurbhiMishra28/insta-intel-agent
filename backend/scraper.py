@@ -1,29 +1,30 @@
 """
-Data acquisition layer for Instagram profile data — NVIDIA-only edition.
+Data acquisition layer for Instagram profile data.
 
-This app runs entirely on ONE API key (NVIDIA NIM, for all AI analysis).
-There are NO third-party Instagram data providers: no Apify, no RapidAPI,
-no Meta Graph tokens. Real profile data comes exclusively from the
-persistent local cache (SQLite), populated by past live fetches.
+Data modes (DATA_MODE env var):
 
-Where profile data comes from now:
+  - "live" (default): real public profile data fetched via Apify's
+    Instagram Scraper actor (apify/instagram-scraper) — profile fields +
+    the ~12 latest posts with real likes, comments, timestamps and media
+    types. Requires APIFY_TOKEN. Every successful fetch is persisted to
+    the local SQLite cache, so repeats are instant and free.
+  - "cache": serve only cached real data; unknown handles get
+    clearly-badged simulated data (data_age_hours = -1). No network calls.
+  - "demo": everything simulated (offline development).
 
-  1. Persistent disk cache (SQLite) — real Instagram data previously
-     fetched. Fresh for PROFILE_DISK_TTL (default 7 days); still served
-     (aged, up to 30 days) as a last resort. Survives restarts.
-  2. In-memory TTL cache — instant repeats within one process.
-  3. Deterministic demo generator — brand-NEW handles that were never
-     cached get simulated data (offline dev). Demo rows carry
-     data_age_hours = -1 so the UI can badge them as simulated.
+Latency layers in live mode, per handle:
 
-Modes, selected by the DATA_MODE environment variable:
+  1. in-memory TTL cache (instant, per-process)
+  2. persistent SQLite disk cache (instant, survives restarts)
+  3. Apify actor run (10–60s; batched — N rivals cost ONE run)
 
-  - "cache" (default): serve cached real data; unknown handles fall back
-    to the demo generator. Never touches a paid third-party API.
-  - "demo": everything is simulated (offline development).
+Live failures fail loudly (RuntimeError → HTTP 503) unless
+FALLBACK_TO_DEMO=true, in which case badged simulated data is served.
 
-Both modes return the same ProfileData shape, so the AI engine and API
-never care which one ran.
+Competitor discovery (live mode): Instagram's own related-accounts signal
+(usually captured free during the main profile fetch), with a keyword
+search over Instagram users as fallback — plus local cache mining
+(mentions/hashtag overlap), which runs first and is completely free.
 """
 import asyncio
 import hashlib
@@ -33,8 +34,11 @@ import random
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
+import httpx
 from dotenv import load_dotenv
 
 # Load backend/.env (if present) BEFORE reading env vars below, so this
@@ -43,21 +47,31 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 from models import Post, ProfileData
 
-DATA_MODE = os.getenv("DATA_MODE", "cache").lower()  # "cache" | "demo"
+DATA_MODE = os.getenv("DATA_MODE", "live").lower()  # "live" | "cache" | "demo"
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip()
+APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "apify/instagram-scraper")
+APIFY_SEARCH_ACTOR_ID = os.getenv("APIFY_SEARCH_ACTOR_ID", "apify/instagram-search-scraper")
+APIFY_RUN_TIMEOUT = int(os.getenv("APIFY_RUN_TIMEOUT", "300"))  # seconds
+# Default false: a failed live fetch must fail loudly (503/502) rather than
+# silently serve fake data. Opt in to demo fallback explicitly.
+FALLBACK_TO_DEMO = os.getenv("FALLBACK_TO_DEMO", "false").lower() in ("1", "true", "yes")
+
+# Simple in-process TTL cache so repeated handles (e.g. compare mode re-fetching
+# the main account) don't re-trigger a paid actor run within the TTL window.
+_CACHE_TTL = int(os.getenv("PROFILE_CACHE_TTL", "1800"))  # seconds
+_profile_cache: Dict[str, tuple] = {}  # username -> (monotonic_ts, ProfileData)
+_related_cache: Dict[str, tuple] = {}  # username -> (monotonic_ts, List[dict])
+_CACHE_LOCK = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
-# Persistent disk cache (SQLite) — the app's real-data source of truth.
+# Persistent disk cache (SQLite) — real data survives restarts, so repeat
+# analyses and compare-mode refetches never re-trigger a paid actor run.
 # ---------------------------------------------------------------------------
 
 _CACHE_DB = os.getenv("PROFILE_CACHE_DB", os.path.join(os.path.dirname(__file__), "profile_cache.db"))
 
 _DISK_TTL_PROFILE = int(os.getenv("PROFILE_DISK_TTL", str(7 * 86400)))   # fresh enough for metrics
 _DISK_TTL_DISCOVERY = int(os.getenv("DISCOVERY_DISK_TTL", str(24 * 3600)))  # competitor lists drift slowly
-
-# In-memory TTL cache so repeated handles don't re-read the disk within a process.
-_CACHE_TTL = int(os.getenv("PROFILE_CACHE_TTL", "1800"))  # seconds
-_profile_cache: Dict[str, tuple] = {}  # username -> (monotonic_ts, ProfileData)
-_CACHE_LOCK = asyncio.Lock()
 
 
 def _cache_conn() -> sqlite3.Connection:
@@ -202,8 +216,481 @@ def normalize_username(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Competitor discovery — mined from the LOCAL cache, zero network
+# Apify live fetch
 # ---------------------------------------------------------------------------
+
+# Apify Instagram actor field names vary slightly by resultsType / version;
+# normalize the common variants here.
+_PROFILE_FIELDS = {
+    "username": ("username", "handle", "ownerUsername"),
+    "full_name": ("fullName", "full_name", "name"),
+    "biography": ("biography", "bio", "description"),
+    "followers": ("followersCount", "followerCount", "edge_followed_by.count", "followers"),
+    "following": ("followsCount", "followingCount", "edge_follow.count", "following", "follows"),
+    "posts_count": ("postsCount", "mediaCount", "edge_owner_to_timeline_media.count", "postsCountNumber"),
+    "is_verified": ("verified", "isVerified"),
+    "is_business": ("businessAccount", "isBusinessAccount"),
+    "category": ("category", "businessCategoryName", "categoryName"),
+}
+
+
+def _dig(item: Any, dotted_key: str) -> Any:
+    """Walks nested dicts/lists, e.g. 'edge_followed_by.count' or
+    'edge_owner_to_timeline_media.edges.0.node'."""
+    cur = item
+    for part in dotted_key.split("."):
+        if isinstance(cur, list) and part.isdigit():
+            idx = int(part)
+            cur = cur[idx] if idx < len(cur) else None
+        elif isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def _pick(item: Dict[str, Any], keys) -> Any:
+    for k in keys:
+        v = _dig(item, k)
+        if v is not None:
+            return v
+    return None
+
+
+def _clean_str(v: Any) -> Optional[str]:
+    """Normalize actor string fields. The Instagram actor serializes JSON
+    nulls as the literal string 'None'/'null' (seen in businessCategoryName
+    and similar fields), so those and blanks count as missing."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ("none", "null", "nil"):
+        return None
+    return s
+
+
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.lower() in ("1", "true", "yes")
+    return bool(v) if v is not None else False
+
+
+def _to_int(v: Any) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _posted_days_ago(item: Dict[str, Any]) -> int:
+    ts_raw = _pick(item, ("timestamp", "takenAtTimestamp", "taken_at_timestamp"))
+    if ts_raw is None:
+        return 0
+    try:
+        if isinstance(ts_raw, (int, float)) or (isinstance(ts_raw, str) and ts_raw.replace(".", "").isdigit()):
+            ts = float(ts_raw)
+            if ts > 1e12:  # epoch milliseconds
+                ts /= 1000.0
+        else:
+            dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            ts = dt.timestamp()
+        return max(0, int((time.time() - ts) / 86400))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _map_post(p: Dict[str, Any], idx: int, owner: str) -> Optional[Post]:
+    """Normalize one post/reel item from any of the actor's result shapes."""
+    if not isinstance(p, dict):
+        return None
+
+    likes = _to_int(_pick(p, ("likesCount", "likeCount", "edge_media_preview_like.count", "edge_liked_by.count")))
+    comments = _to_int(_pick(p, ("commentsCount", "commentCount", "edge_media_to_comment.count")))
+    views = _to_int(_pick(p, ("videoViewCount", "playCount", "videoPlayCount")))
+
+    # Exact ISO timestamp (kept for best-time analytics; falls back to None).
+    posted_at_iso: Optional[str] = None
+    ts_raw = _pick(p, ("timestamp", "takenAtTimestamp", "taken_at_timestamp"))
+    if ts_raw is not None:
+        try:
+            if isinstance(ts_raw, (int, float)) or (isinstance(ts_raw, str) and ts_raw.replace(".", "").isdigit()):
+                ts = float(ts_raw)
+                if ts > 1e12:
+                    ts /= 1000.0
+                posted_at_iso = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            else:
+                dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                posted_at_iso = dt.isoformat()
+        except (TypeError, ValueError, OverflowError):
+            posted_at_iso = None
+    if likes == 0 and comments == 0 and views == 0:
+        # Shell/placeholder items sometimes appear in results; skip them.
+        return None
+
+    caption = _pick(p, ("caption", "edge_media_to_caption.edges.0.node.text")) or ""
+    if isinstance(caption, list):
+        caption = " ".join(
+            (e.get("node", {}).get("text", "") if isinstance(e, dict) else str(e))
+            for e in caption
+        )
+    caption = _clean_str(caption) or ""
+
+    raw_type = str(_pick(p, ("type", "media_type", "productType", "__typename")) or "image")
+    media_type = _MEDIA_TYPE_MAP.get(raw_type, "image")
+    if media_type == "video" and "clip" in raw_type.lower():
+        media_type = "reel"
+
+    hashtags = sorted({f"#{h.lower()}" for h in re.findall(r"#(\w+)", caption)})[:10]
+
+    return Post(
+        id=str(_pick(p, ("id", "shortCode", "shortcode", "url"))) or f"{owner}_{idx}",
+        caption=caption[:600],
+        likes=likes,
+        comments=comments,
+        posted_days_ago=_posted_days_ago(p),
+        hashtags=hashtags,
+        media_type=media_type,
+        views=views,
+        posted_at=posted_at_iso,
+    )
+
+
+def _map_profile(items: List[Dict[str, Any]], requested: str) -> ProfileData:
+    """Turn the actor's dataset items into a ProfileData.
+
+    Handles resultsType=details (one profile item, possibly with embedded
+    latestPosts), resultsType=posts (post items, no profile fields), and
+    mixed output where both appear."""
+    profile_item: Optional[Dict[str, Any]] = None
+    post_items: List[Dict[str, Any]] = []
+
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if profile_item is None and (
+            it.get("followersCount") is not None or it.get("biography") is not None
+        ):
+            profile_item = it
+        elif it.get("likesCount") is not None or it.get("shortCode") is not None:
+            post_items.append(it)
+
+    if profile_item is not None:
+        for key in ("latestPosts", "posts", "edge_owner_to_timeline_media.edges"):
+            embedded = profile_item.get(key)
+            if isinstance(embedded, list) and embedded:
+                unwrapped = [
+                    e.get("node") if isinstance(e, dict) and isinstance(e.get("node"), dict) else e
+                    for e in embedded
+                ]
+                post_items = [p for p in unwrapped if isinstance(p, dict)] or post_items
+                break
+
+    if profile_item is None and not post_items:
+        raise ValueError(
+            f"Instagram profile '@{requested}' not found or returned no data. "
+            "Check the spelling of the handle."
+        )
+
+    if profile_item is not None:
+        pi = profile_item
+        username = str(_pick(pi, _PROFILE_FIELDS["username"]) or requested)
+        recent_posts = [p for p in (_map_post(x, i, username) for i, x in enumerate(post_items)) if p]
+        return ProfileData(
+            username=username.lower(),
+            full_name=_clean_str(_pick(pi, _PROFILE_FIELDS["full_name"]))
+            or username.replace("_", " ").replace(".", " ").title(),
+            bio=_clean_str(_pick(pi, _PROFILE_FIELDS["biography"])) or "",
+            followers=_to_int(_pick(pi, _PROFILE_FIELDS["followers"])),
+            following=_to_int(_pick(pi, _PROFILE_FIELDS["following"])),
+            posts_count=_to_int(_pick(pi, _PROFILE_FIELDS["posts_count"])),
+            is_verified=_as_bool(_pick(pi, _PROFILE_FIELDS["is_verified"])),
+            is_business=_as_bool(_pick(pi, _PROFILE_FIELDS["is_business"])),
+            category=_clean_str(_pick(pi, _PROFILE_FIELDS["category"])),
+            recent_posts=recent_posts,
+        )
+
+    # Posts-only output (no profile fields): derive what we can from posts.
+    recent_posts = [p for p in (_map_post(x, i, requested) for i, x in enumerate(post_items)) if p]
+    if not recent_posts:
+        raise ValueError(f"No usable posts found for '@{requested}'.")
+    return ProfileData(
+        username=requested.lower(),
+        full_name=requested.replace("_", " ").replace(".", " ").title(),
+        bio="",
+        followers=0,
+        following=0,
+        posts_count=len(recent_posts),
+        is_verified=False,
+        is_business=False,
+        category=None,
+        recent_posts=recent_posts,
+    )
+
+
+def _actor_url(results_type: str, results_limit: int) -> str:
+    # "user/name" → "user~name"; numeric actor ids pass through untouched.
+    actor_path = APIFY_ACTOR_ID.replace("/", "~") if "~" not in APIFY_ACTOR_ID else APIFY_ACTOR_ID
+    return (
+        f"https://api.apify.com/v2/acts/{quote(actor_path, safe='~')}"
+        f"/run-sync-get-dataset-items?token={quote(APIFY_TOKEN, safe='')}"
+    )
+
+
+_apify_preflight_ok_until: Dict[str, float] = {}  # token -> ts until which credit was confirmed
+PREFLIGHT_RECHECK_SECS = 300  # re-probe free limits API at most every 5 min / token
+
+
+def _apify_preflight_check(token: str) -> None:
+    """Free, unmetered quota gate BEFORE starting a paid actor run.
+
+    GET /users/me/limits is an account-management endpoint — it works even
+    when platform credit is spent. Checking it here means a fresh-handle
+    request fails in ~1s with a precise message instead of hanging ~15s on
+    a doomed actor run. Raises RuntimeError when the account's monthly
+    credit is exhausted; never blocks a run when the check itself fails."""
+    now = time.time()
+    if now < _apify_preflight_ok_until.get(token, 0):
+        return  # credit confirmed recently; proceed straight to the run
+    try:
+        r = httpx.get(
+            "https://api.apify.com/v2/users/me/limits",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=8,
+        )
+        d = r.json().get("data", {})
+        used = float((d.get("current") or {}).get("monthlyUsageUsd") or 0)
+        cap = float((d.get("limits") or {}).get("maxMonthlyUsageUsd") or 0)
+        if cap > 0 and used >= cap:
+            end = str((d.get("monthlyUsageCycle") or {}).get("endAt") or "")
+            reset = end[:10] or "the next billing cycle"
+            raise RuntimeError(
+                f"Apify monthly free credit exhausted (${used:.2f} of ${cap:.2f} used). "
+                f"Actor runs resume automatically when the cycle resets on {reset} — "
+                "or raise the limit now: Apify Console → Settings → Usage & Billing."
+            )
+        _apify_preflight_ok_until[token] = now + PREFLIGHT_RECHECK_SECS
+    except RuntimeError:
+        raise
+    except Exception:
+        pass  # preflight must never block a legitimate run
+
+
+def _usage_limit_message() -> str:
+    """Best-effort dynamic message for the usage-limit block: pull the real
+    spend, cap and reset date from Apify's limits API so the error says
+    exactly when runs resume. Falls back to a static hint if the API call
+    fails (this path must never mask the original error)."""
+    try:
+        r = httpx.get(
+            "https://api.apify.com/v2/users/me/limits",
+            headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+            timeout=10,
+        )
+        d = r.json().get("data", {})
+        used = float((d.get("current") or {}).get("monthlyUsageUsd") or 0)
+        cap = float((d.get("limits") or {}).get("maxMonthlyUsageUsd") or 0)
+        end = str((d.get("monthlyUsageCycle") or {}).get("endAt") or "")
+        reset = end[:10] or "the next billing cycle"
+        return (
+            f"Apify monthly free credit exhausted (${used:.2f} of ${cap:.2f} used). "
+            f"Actor runs resume automatically when the cycle resets on {reset} — "
+            "or raise the limit now: Apify Console → Settings → Usage & Billing."
+        )
+    except Exception:
+        return (
+            "Apify account blocked this actor run: monthly usage hard limit "
+            "exceeded. Raise/remove the limit or wait for the billing reset "
+            "(Apify console → Settings → Usage & Billing), then retry."
+        )
+
+
+def _require_items(resp: httpx.Response, actor_label: str) -> List[Dict[str, Any]]:
+    """Shared status-code handling + JSON parsing for actor run endpoints."""
+    if resp.status_code in (401, 403):
+        detail = ""
+        try:
+            err = resp.json().get("error", {})
+            detail = f"{err.get('type', '')}: {err.get('message', '')}".strip(": ")
+        except Exception:
+            detail = (resp.text or "")[:200]
+        low = detail.lower()
+        if "usage" in low or "limit" in low or "platform-feature-disabled" in low:
+            raise RuntimeError(_usage_limit_message())
+        raise RuntimeError(
+            f"Apify rejected the request (401/403). {detail or 'Double-check APIFY_TOKEN.'}"
+        )
+    if resp.status_code == 402:
+        raise RuntimeError(
+            "Apify account needs a paid plan or has exhausted its free "
+            "platform credits for this actor (402)."
+        )
+    if resp.status_code == 404:
+        raise RuntimeError(
+            f"Apify actor '{actor_label}' not found (404). Check the actor id env var."
+        )
+    if resp.status_code in (408, 504):
+        raise RuntimeError("Apify actor run timed out. Try again in a moment.")
+    resp.raise_for_status()
+    items = resp.json()
+    if not isinstance(items, list):
+        raise RuntimeError("Apify returned an unexpected response shape.")
+    return items
+
+
+def _require_apify_token() -> None:
+    """Fail FAST (no network) when a live fetch is attempted without a token."""
+    if not APIFY_TOKEN:
+        raise RuntimeError(
+            "No Apify token configured — set APIFY_TOKEN in backend/.env "
+            "(or switch DATA_MODE=demo for simulated data)."
+        )
+
+
+async def _run_actor(results_type: str, username: str, results_limit: int) -> List[Dict[str, Any]]:
+    _require_apify_token()
+    run_input = {
+        "directUrls": [f"https://www.instagram.com/{username}/"],
+        "resultsType": results_type,
+        "resultsLimit": results_limit,
+        "addParentData": True,
+    }
+    await asyncio.to_thread(_apify_preflight_check, APIFY_TOKEN)
+    async with httpx.AsyncClient(timeout=APIFY_RUN_TIMEOUT + 30) as client:
+        resp = await client.post(_actor_url(results_type, results_limit), json=run_input)
+    return _require_items(resp, APIFY_ACTOR_ID)
+
+
+async def _run_actor_multi(usernames: List[str], results_type: str = "details", results_limit: int = 13) -> List[Dict[str, Any]]:
+    """One actor run for SEVERAL profiles (the actor accepts multiple
+    directUrls). This is the key latency win: N rivals cost one run instead
+    of N sequential 20-60s fetches."""
+    _require_apify_token()
+    run_input = {
+        "directUrls": [f"https://www.instagram.com/{u}/" for u in usernames],
+        "resultsType": results_type,
+        "resultsLimit": results_limit,
+        "addParentData": True,
+    }
+    await asyncio.to_thread(_apify_preflight_check, APIFY_TOKEN)
+    async with httpx.AsyncClient(timeout=APIFY_RUN_TIMEOUT + 30) as client:
+        resp = await client.post(_actor_url(results_type, results_limit), json=run_input)
+    return _require_items(resp, APIFY_ACTOR_ID)
+
+
+async def _run_search_actor(queries: List[str], limit: int) -> List[Dict[str, Any]]:
+    """Run the Instagram search scraper for user accounts matching the query
+    terms. Returns normalized candidate rows (username/full_name/bio/
+    followers/verified/private)."""
+    _require_apify_token()
+    actor_path = (
+        APIFY_SEARCH_ACTOR_ID.replace("/", "~")
+        if "~" not in APIFY_SEARCH_ACTOR_ID
+        else APIFY_SEARCH_ACTOR_ID
+    )
+    url = (
+        f"https://api.apify.com/v2/acts/{quote(actor_path, safe='~')}"
+        f"/run-sync-get-dataset-items?token={quote(APIFY_TOKEN, safe='')}"
+    )
+    run_input = {
+        # NOTE: this actor takes ALL keywords in one 'search' field,
+        # comma-separated (searchQueries is silently ignored).
+        "search": ", ".join(queries[:3]),
+        "searchType": "user",
+        "searchLimit": max(5, min(limit, 15)),
+    }
+    async with httpx.AsyncClient(timeout=APIFY_RUN_TIMEOUT + 30) as client:
+        resp = await client.post(url, json=run_input)
+    items = _require_items(resp, APIFY_SEARCH_ACTOR_ID)
+
+    rows: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        username = str(it.get("username") or "").strip()
+        if not username or not _USERNAME_RE.match(username):
+            continue  # search output mixes in place/hashtag rows
+        rows.append({
+            "username": username,
+            "full_name": _clean_str(it.get("fullName")) or "",
+            "bio": _clean_str(it.get("biography")) or "",
+            "followers": _to_int(it.get("followersCount")),
+            "verified": _as_bool(it.get("verified")),
+            "private": _as_bool(it.get("private") or it.get("isPrivate")),
+        })
+    return rows
+
+
+async def _fetch_live_profile(username: str) -> ProfileData:
+    """Fetch a real profile. Primary: one 'details' run, which returns the
+    profile fields plus its ~12 latest posts with real engagement. Fallback:
+    a 'posts' run if the details run yielded no usable posts."""
+    items = await _run_actor("details", username, results_limit=13)
+    profile = _map_profile(items, username)
+    _stash_related(username, items)
+
+    # Transient scrape glitches can yield an empty profile shell; retry once.
+    if profile.followers == 0 and not profile.recent_posts:
+        try:
+            items = await _run_actor("details", username, results_limit=13)
+            retry = _map_profile(items, username)
+            if retry.followers > 0 or retry.recent_posts:
+                profile = retry
+                _stash_related(username, items)
+        except (RuntimeError, httpx.HTTPError):
+            pass
+
+    if not profile.recent_posts:
+        try:
+            items2 = await _run_actor("posts", username, results_limit=12)
+            profile2 = _map_profile(items2, username)
+        except (ValueError, RuntimeError, httpx.HTTPError):
+            profile2 = None
+        if profile2 and profile2.recent_posts:
+            profile.recent_posts = profile2.recent_posts
+
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# Competitor discovery — related accounts + local cache mining + search
+# ---------------------------------------------------------------------------
+
+def _candidate_row(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize one relatedProfiles entry into a candidate dict."""
+    if not isinstance(r, dict):
+        return None
+    username = str(r.get("username") or "").strip()
+    if not username or not _USERNAME_RE.match(username):
+        return None
+    return {
+        "username": username,
+        "full_name": r.get("fullName") or "",
+        "bio": r.get("biography") or "",
+        "followers": _to_int(r.get("followersCount")),
+        "verified": _as_bool(r.get("verified")),
+        "private": _as_bool(r.get("private")),
+    }
+
+
+def _stash_related(username: str, items: List[Dict[str, Any]]) -> None:
+    """Opportunistically remember relatedProfiles from a details run so
+    discovery usually costs zero extra actor runs."""
+    try:
+        if items and isinstance(items[0], dict):
+            rp = items[0].get("relatedProfiles")
+            if isinstance(rp, list) and rp:
+                _related_cache[username.lower()] = (time.monotonic(), rp)
+    except Exception:
+        pass
+
 
 _STOPWORDS = {
     "the", "and", "for", "with", "your", "you", "our", "this", "that", "from",
@@ -212,13 +699,17 @@ _STOPWORDS = {
 }
 
 
-def _search_terms_for(username: str, profile: Optional[ProfileData]) -> List[str]:
-    """Derive SHORT niche terms from the account's bio/full name/username.
-    (Kept for candidate relevance ranking.)"""
+def _search_terms_for(username: str, profile_item: Optional[Dict[str, Any]]) -> List[str]:
+    """Derive SHORT competitor-search terms from the account itself. Bio words
+    carry the strongest niche signal, then full-name words, then username-stem
+    words. Instagram user search works best on 1-word queries — long phrases
+    return fuzzy junk. Works for ANY account — this is what makes discovery
+    universal."""
     raw: List[str] = []
-    if profile:
-        raw.extend((profile.bio or "").replace("\n", " ").split(" "))
-        name = (profile.full_name or "").strip()
+    if profile_item:
+        bio = str(profile_item.get("biography") or "")
+        raw.extend(bio.replace("\n", " ").split(" "))
+        name = str(profile_item.get("fullName") or "").strip()
         if name and 2 <= len(name) <= 40:
             raw.extend(name.split())
     stem = username.split(".")[0].replace("_", " ").replace("-", " ").strip()
@@ -266,10 +757,8 @@ def _local_discover_sync(username: str, limit: int) -> List[Dict[str, Any]]:
       3. niche overlap with other cached accounts (shared hashtags/category)
 
     Only candidates whose own profile is cached within the profile TTL are
-    returned, so the whole competitor-research flow completes offline:
-    the NVIDIA LLM picks the rivals and writes the market research, and the
-    numbers come from the cache.
-    """
+    returned, so the whole competitor-research flow can complete offline when
+    the provider is unavailable."""
     uname = username.lower()
     profiles: Dict[str, Dict[str, Any]] = {}
     try:
@@ -376,30 +865,96 @@ async def _local_discover(username: str, limit: int) -> List[Dict[str, Any]]:
 
 
 async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict[str, Any]]:
-    """Find candidate competitors for an Instagram handle — entirely from the
-    local cache (mentions, hashtag/category overlap). No network, no tokens.
+    """Find candidate competitors for ANY Instagram handle.
 
-    In demo mode, deterministic pseudo-competitors are generated instead.
+    Strategy (in order):
+      1. Local cache mining (mentions/hashtag overlap) — free, instant.
+      2. Instagram's related-accounts signal for the handle — usually free,
+         captured during the main profile fetch.
+      3. Keyword search over Instagram users, with terms derived from the
+         account's username/full name/bio — so accounts with no related-
+         accounts data still get competitors.
     """
     username = normalize_username(username)
     if DATA_MODE == "demo":
         return _demo_related(username, limit)
 
     # Disk cache: discovered competitor lists drift slowly — serve instantly
-    # for a day instead of re-mining.
+    # for a day instead of re-running discovery actor calls.
     cache_key = f"related:{username}:{limit}"
     disk = await asyncio.to_thread(_cache_get, cache_key, _DISK_TTL_DISCOVERY)
     if isinstance(disk, list) and disk:
         return disk
 
+    # Provider-free discovery: mine the local profile cache (mentions,
+    # hashtag/category overlap). When this yields candidates, competitor
+    # research completes with ZERO provider calls — the LLM does the
+    # selection and analysis, the numbers come from previously fetched
+    # real data. Tried before ANY paid provider run.
     local = await _local_discover(username, limit)
     if local:
         await asyncio.to_thread(_cache_set, cache_key, local)
-    return local
+        return local
+
+    # Live mode without a token: same contract as cache mode — nothing
+    # beyond the local cache is possible, but never raise.
+    if DATA_MODE != "live" or not APIFY_TOKEN:
+        return []
+
+    profile_item: Optional[Dict[str, Any]] = None
+    async with _CACHE_LOCK:
+        entry = _related_cache.get(username)
+    rp: Optional[List[Any]] = None
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL:
+        rp = entry[1]
+    elif entry:
+        _related_cache.pop(username, None)
+
+    if rp is None:
+        try:
+            items = await _run_actor("details", username, results_limit=1)
+            if items and isinstance(items[0], dict):
+                profile_item = items[0]
+                _stash_related(username, items)
+                rp = items[0].get("relatedProfiles")
+        except (RuntimeError, httpx.HTTPError):
+            if FALLBACK_TO_DEMO:
+                return _demo_related(username, limit)
+            raise
+        rp = rp if isinstance(rp, list) else []
+
+    candidates: List[Dict[str, Any]] = []
+    for r in rp or []:
+        row = _candidate_row(r)
+        if row and row["username"].lower() != username.lower():
+            candidates.append(row)
+        if len(candidates) >= limit:
+            await asyncio.to_thread(_cache_set, cache_key, candidates)
+            return candidates
+
+    # Fallback: keyword search — makes discovery work for every account.
+    queries = _search_terms_for(username, profile_item)
+    if queries:
+        try:
+            search_rows = await _run_search_actor(queries, limit=limit)
+        except (RuntimeError, httpx.HTTPError):
+            if FALLBACK_TO_DEMO:
+                return candidates  # return whatever related accounts we already have
+            raise
+        fresh = [
+            row for row in search_rows
+            if row["username"].lower() != username.lower()
+            and row["username"].lower() not in {c["username"].lower() for c in candidates}
+        ]
+        fresh = _rank_by_relevance(fresh, queries)
+        candidates.extend(fresh[: max(0, limit - len(candidates))])
+    if candidates:
+        await asyncio.to_thread(_cache_set, cache_key, candidates)
+    return candidates
 
 
 # ---------------------------------------------------------------------------
-# Demo generator (offline dev / unknown handles in cache mode)
+# Demo generator (offline dev / FALLBACK_TO_DEMO)
 # ---------------------------------------------------------------------------
 
 CATEGORIES = ["Fashion", "Fitness", "Food & Beverage", "Tech", "Beauty",
@@ -502,7 +1057,7 @@ def _demo_related(username: str, limit: int) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoint
+# Public entrypoints
 # ---------------------------------------------------------------------------
 
 def _cached(username: str) -> Optional[ProfileData]:
@@ -520,9 +1075,10 @@ def is_demo_row(profile: ProfileData) -> bool:
 
 
 async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
-    """Fetch several profiles at once — cache and/or demo, no network.
-    Returns a map of lower-cased username -> ProfileData for every profile
-    that could be served (missing keys = unservable)."""
+    """Fetch several profiles at once. In live mode the missing handles are
+    fetched in a SINGLE actor run. Returns a map of lower-cased username ->
+    ProfileData for every profile that could be served (missing keys =
+    failed fetches the caller should warn about)."""
     wanted: List[str] = []
     for u in usernames:
         try:
@@ -545,7 +1101,11 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
             result[u] = generate_demo_profile(u)
         return result
 
-    # Disk cache layer.
+    if not missing:
+        return result
+
+    # Disk cache layer — profiles fetched in a previous process (or a previous
+    # backend restart) come back instantly, no actor run, no cost.
     still_missing: List[str] = []
     for u in missing:
         disk = await asyncio.to_thread(_disk_profile_get, u)
@@ -559,30 +1119,72 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     if not still_missing:
         return result
 
-    # Cache-only mode: unknown handles fall back to deterministic simulated
-    # data (badged via data_age_hours = -1) so pipelines never hard-fail.
-    for u in still_missing:
-        stale = await asyncio.to_thread(_disk_profile_get_any, u)
-        if stale is not None:
-            result[u] = stale
-            async with _CACHE_LOCK:
-                _profile_cache[u] = (time.monotonic(), stale)
+    # Cache/demo mode (or live without a token): unknown handles fall back to
+    # deterministic simulated data (badged via data_age_hours = -1) so
+    # pipelines never hard-fail.
+    if DATA_MODE != "live" or not APIFY_TOKEN:
+        for u in still_missing:
+            stale = await asyncio.to_thread(_disk_profile_get_any, u)
+            if stale is not None:
+                result[u] = stale
+                async with _CACHE_LOCK:
+                    _profile_cache[u] = (time.monotonic(), stale)
+            else:
+                demo = generate_demo_profile(u)
+                demo.data_age_hours = -1
+                result[u] = demo
+                async with _CACHE_LOCK:
+                    _profile_cache[u] = (time.monotonic(), demo)
+        return result
+
+    # LIVE: one batched actor run for every uncached handle.
+    try:
+        items = await _run_actor_multi(still_missing, "details", results_limit=13)
+    except (RuntimeError, httpx.HTTPError):
+        if FALLBACK_TO_DEMO:
+            for u in still_missing:
+                result[u] = generate_demo_profile(u)
+            return result
+        raise
+
+    # Group dataset rows per profile: profile rows by their username, post
+    # rows by their owner.
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if it.get("followersCount") is not None or it.get("biography") is not None:
+            owner = str(it.get("username") or "").strip().lower()
         else:
-            demo = generate_demo_profile(u)
-            demo.data_age_hours = -1
-            result[u] = demo
-            async with _CACHE_LOCK:
-                _profile_cache[u] = (time.monotonic(), demo)
+            owner = str(it.get("ownerUsername") or it.get("username") or "").strip().lower()
+        if owner:
+            groups.setdefault(owner, []).append(it)
+
+    for u in still_missing:
+        group = groups.get(u, [])
+        if not group:
+            continue  # caller surfaces this as a warning
+        try:
+            profile = _map_profile(group, u)
+        except ValueError:
+            continue
+        _stash_related(u, group)
+        await asyncio.to_thread(_disk_profile_set, u, profile)  # persist across restarts
+        async with _CACHE_LOCK:
+            _profile_cache[u] = (time.monotonic(), profile)
+        result[u] = profile
+
     return result
 
 
 async def get_profile(username: str) -> ProfileData:
-    """Profile fetch with three latency layers — NO third-party calls:
+    """Profile fetch with latency layers:
 
       1. in-memory TTL cache (instant, per-process)
-      2. persistent SQLite disk cache (instant, survives restarts) — the
-         app's source of REAL Instagram data
-      3. deterministic demo generator (unknown handles; badged simulated)
+      2. persistent SQLite disk cache (instant, survives restarts)
+      3. live Apify actor run (10-60s) — only in live mode with a token
+      4. deterministic demo generator (cache/demo modes, badged simulated;
+         live mode only when FALLBACK_TO_DEMO=true)
     """
     username = normalize_username(username)
 
@@ -605,8 +1207,24 @@ async def get_profile(username: str) -> ProfileData:
             _profile_cache[username] = (time.monotonic(), disk)
         return disk
 
-    # Last resort: deterministic simulated data (badged, never presented
-    # as real) — or, when available, any older cached real data.
+    live_capable = DATA_MODE == "live" and bool(APIFY_TOKEN)
+    if live_capable:
+        # Layer 3: live fetch.
+        try:
+            profile = await _fetch_live_profile(username)
+        except (RuntimeError, httpx.HTTPError):
+            if FALLBACK_TO_DEMO:
+                profile = None
+            else:
+                raise
+        else:
+            await asyncio.to_thread(_disk_profile_set, username, profile)
+            async with _CACHE_LOCK:
+                _profile_cache[username] = (time.monotonic(), profile)
+            return profile
+
+    # Live fetch failed (with FALLBACK_TO_DEMO) or non-live mode: last resort
+    # is stale REAL data, then a badged simulated row.
     stale = await asyncio.to_thread(_disk_profile_get_any, username)
     if stale is not None:
         async with _CACHE_LOCK:

@@ -8,6 +8,8 @@ services:
     environment:
       # Compose reads these from your shell or from a .env file next to
       # docker-compose.yml (see .env.example in backend/ for the full list).
+      # live = real Instagram data via Apify (needs APIFY_TOKEN); cache =
+      # local cache only; demo = simulated data.
       - DATA_MODE=${DATA_MODE:-live}
       - APIFY_TOKEN=${APIFY_TOKEN:-}
       - APIFY_ACTOR_ID=${APIFY_ACTOR_ID:-apify/instagram-scraper}

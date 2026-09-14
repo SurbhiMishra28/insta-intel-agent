@@ -92,7 +92,10 @@ def root():
         "status": "ok",
         "service": "insta-intel-agent",
         "data_mode": scraper.DATA_MODE,
-        "data_source": "local-cache + NVIDIA-only AI",
+        "data_source": (
+            "Apify live fetch + local cache" if scraper.DATA_MODE == "live"
+            else "local-cache + NVIDIA-only AI"
+        ),
         "ai_engine": "langchain" if ai_engine.LLM_API_KEY else "rule-based-fallback",
     }
 
@@ -117,13 +120,18 @@ def data_source_info():
             ).fetchone()[0]
     except Exception:
         pass
+    live = scraper.DATA_MODE == "live" and bool(scraper.APIFY_TOKEN)
     return {
         "ok": True,
-        "source": "cache",
+        "source": "live" if live else "cache",
         "data_mode": scraper.DATA_MODE,
         "ai_provider": "nvidia-nim" if ai_engine.LLM_API_KEY else "rule-based-fallback",
         "cached_profiles": cached_profiles,
         "note": (
+            "Real Instagram data is fetched live via the Apify API and "
+            "cached locally, so repeat analyses are instant and free. "
+            "All AI analysis runs on the NVIDIA NIM API."
+        ) if live else (
             "Real Instagram data is served from the local cache of past "
             "fetches; unknown handles get clearly-badged simulated data. "
             "All AI analysis runs on the NVIDIA NIM API."

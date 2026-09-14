@@ -12,15 +12,19 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.4"
-      # Data comes from the local cache of past fetches; unknown handles get
-      # clearly-badged simulated data. No third-party data API is called.
+      # Live public Instagram data via the Apify API (token below); every
+      # fetch is cached so repeat analyses are instant and free.
       - key: DATA_MODE
-        value: cache
+        value: live
       # All AI analysis runs on NVIDIA NIM.
       - key: LLM_BASE_URL
         value: https://integrate.api.nvidia.com/v1
       - key: LLM_MODEL
         value: openai/gpt-oss-20b
+      # Apify — live Instagram data. Set the real token in the Render
+      # dashboard (instaiq-backend → Environment) after the first deploy.
+      - key: APIFY_TOKEN
+        value: your_apify_token_here
       # Secret: set this in the Render dashboard after the first deploy
       # (marked sync:false so the blueprint never hardcodes it).
       - key: LLM_API_KEY
