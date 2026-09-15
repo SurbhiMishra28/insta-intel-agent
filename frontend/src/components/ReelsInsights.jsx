@@ -1,5 +1,7 @@
 export default function ReelsInsights({ reels }) {
-  if (!reels) return null;
+  // No reels in the sample → nothing meaningful to show. Hide the whole card
+  // instead of displaying zeros, "hidden" and "n/a" placeholders.
+  if (!reels || !reels.reels_count) return null;
 
   const stat = (label, value, title) => (
     <div className="stat" style={{ minWidth: 110 }} title={title}>
