@@ -279,6 +279,13 @@ def _disk_profile_get_any(username: str) -> Optional[ProfileData]:
 
 def _disk_profile_set(username: str, p: ProfileData) -> None:
     _cache_set(f"profile:{username}", _profile_to_json(p))
+    # Mirror every fetched handle into the browsable profile data store
+    # (datastore.py / profile_datastore.db) — best-effort, never breaks a fetch.
+    try:
+        import datastore
+        datastore.upsert_profile(p)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

@@ -1437,3 +1437,146 @@ textarea:focus-visible {
   padding-left: var(--s-3);
   border-left: 2px solid var(--hairline);
 }
+
+/* ---------- Data store section ---------- */
+
+.ds-statsheader {
+  display: flex;
+  gap: var(--s-5);
+  flex-wrap: wrap;
+  font-size: 13.5px;
+  color: var(--paper-dim);
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-m);
+  padding: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-4);
+}
+
+.ds-statsheader b { color: var(--signal); font-family: var(--font-display); margin-right: 4px; }
+
+.ds-search {
+  width: 100%;
+  max-width: 360px;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--paper);
+  padding: 9px 16px;
+  font-size: 13.5px;
+  margin-bottom: var(--s-4);
+  outline: none;
+}
+.ds-search:focus { border-color: var(--signal-dim); }
+
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--s-3);
+}
+
+.ds-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-m);
+  padding: var(--s-4);
+  color: var(--paper);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.ds-card:hover { border-color: var(--signal-dim); transform: translateY(-2px); }
+
+.ds-card-head { display: flex; align-items: center; gap: 8px; }
+.ds-handle { font-family: var(--font-display); font-weight: 600; font-size: 15px; color: var(--signal); }
+.ds-card-name { font-size: 12.5px; color: var(--paper); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ds-card-meta { font-size: 11.5px; color: var(--paper-dim); }
+
+.ds-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+  margin: var(--s-5) 0 10px;
+}
+
+.ds-back {
+  background: none;
+  border: 1px solid var(--hairline);
+  color: var(--paper-dim);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  margin-bottom: var(--s-4);
+}
+.ds-back:hover { color: var(--paper); border-color: var(--signal-dim); }
+
+.ds-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ds-detail-head .ds-handle { font-size: 22px; color: var(--paper); }
+.ds-meta { font-size: 12px; color: var(--paper-dim); }
+.ds-bio { margin: 6px 0 0; max-width: 72ch; }
+
+.ds-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--s-3) var(--s-5);
+  margin-top: var(--s-4);
+}
+
+.ds-posts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--s-3); }
+
+.ds-post {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-s);
+  padding: var(--s-3) var(--s-4);
+  background: var(--panel);
+}
+
+.ds-post-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+
+.ds-format {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-raised);
+  color: var(--paper-dim);
+}
+.ds-format-reel, .ds-format-video { background: rgba(255, 92, 138, 0.16); color: var(--acc-rose); }
+.ds-format-carousel { background: rgba(157, 123, 255, 0.16); color: var(--acc-violet); }
+.ds-format-image { background: rgba(74, 222, 156, 0.16); color: var(--acc-green); }
+
+.ds-post-age { font-size: 11px; color: var(--paper-dim); }
+
+.ds-post-metrics {
+  display: flex;
+  gap: 14px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--paper);
+  margin-bottom: 6px;
+}
+
+.ds-post-caption {
+  font-size: 12.5px;
+  color: var(--paper-dim);
+  line-height: 1.55;
+  margin: 0 0 8px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ds-post-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.ds-post-tags .hashtag-chip { font-size: 10.5px; padding: 3px 8px; }
+
+.ds-fetchlog { display: flex; flex-direction: column; gap: 6px; }
+.ds-fetchrow { font-size: 12px; color: var(--paper-dim); font-variant-numeric: tabular-nums; }

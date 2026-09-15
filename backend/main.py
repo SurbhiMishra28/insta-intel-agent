@@ -11,6 +11,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 import ai_engine
 import analytics
+import datastore
 import scraper
 import storage
 from typing import Optional
@@ -105,6 +106,31 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+# ---------------------------------------------------------------------------
+# Profile data store — the browsable record of every handle ever fetched
+# ---------------------------------------------------------------------------
+
+@app.get("/api/data-store")
+def data_store(username: Optional[str] = Query(None)):
+    """Browse the stored Instagram data. No `username` → all handles (summary)
+    plus store stats and the recent fetch log; with `username` → that handle's
+    full stored profile and every post the agent kept."""
+    if username:
+        try:
+            uname = scraper.normalize_username(username)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        record = datastore.get_profile(uname)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"@{uname} is not in the data store yet — run an analysis on this handle first.")
+        return {"profile": record, "fetch_log": datastore.fetch_log(uname)}
+    return {
+        "stats": datastore.stats(),
+        "handles": datastore.list_profiles(),
+        "recent_fetches": datastore.fetch_log(limit=30),
+    }
 
 
 @app.get("/api/usage")

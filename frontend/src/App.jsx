@@ -17,6 +17,7 @@ import MonthlyReviewer from './components/MonthlyReviewer.jsx';
 import WhitespaceFinder from './components/WhitespaceFinder.jsx';
 import PWAInstallBanner from './components/PWAInstallBanner.jsx';
 import ChatBox from './components/ChatBox.jsx';
+import DataStore from './components/DataStore.jsx';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -187,6 +188,7 @@ export default function App() {
     ['toolkit', 'Toolkit'],
     ['trends', 'Trends'],
     ['research', 'Competitors'],
+    ['datastore', 'Data store'],
     ['chat', 'Ask AI'],
   ];
 
@@ -459,6 +461,10 @@ export default function App() {
                 <MonthlyReviewer review={review} />
               </div>
             )}
+          </Section>
+
+          <Section id="datastore" label="Data store — every handle the agent has researched">
+            <DataStore api={API_URL} />
           </Section>
 
           <div id="chat">

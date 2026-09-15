@@ -29,3 +29,6 @@ backend/_verify_*.json
 
 # Vite PWA dev artifacts
 frontend/dev-dist/
+
+# Profile data store
+backend/profile_datastore.db
