@@ -17,6 +17,41 @@ const timeAgo = (iso) => {
   return `${Math.round(h / 24)}d ago`;
 };
 
+function download(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+const csvCell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+
+function exportJson(p) {
+  download(
+    `instaiq-${p.username}-data.json`,
+    JSON.stringify(p, null, 2),
+    'application/json'
+  );
+}
+
+function exportCsv(p) {
+  const header = ['shortcode', 'media_type', 'posted_at', 'posted_days_ago', 'likes', 'comments', 'views', 'caption', 'hashtags'];
+  const rows = p.posts.map((post) => [
+    post.id, post.media_type, post.posted_at || '', post.posted_days_ago ?? '',
+    post.likes, post.comments, post.views, post.caption, (post.hashtags || []).join(' '),
+  ].map(csvCell).join(','));
+  download(
+    `instaiq-${p.username}-posts.csv`,
+    '\ufeff' + [header.join(','), ...rows].join('\r\n'),
+    'text/csv;charset=utf-8'
+  );
+}
+
 function HandleDetail({ api, username, onBack }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -46,6 +81,14 @@ function HandleDetail({ api, username, onBack }) {
         <span className="ds-meta">
           fetched {timeAgo(p.fetched_at)} · {p.fetch_count} fetch(es) · {p.posts_stored} posts stored
         </span>
+        <div className="ds-export">
+          <button className="ds-export-btn" onClick={() => exportJson(p)} title="Download the full stored record as JSON">
+            ⬇ JSON
+          </button>
+          <button className="ds-export-btn" onClick={() => exportCsv(p)} title="Download all stored posts as a spreadsheet">
+            ⬇ CSV
+          </button>
+        </div>
       </div>
       {p.bio && <p className="muted ds-bio">{p.bio}</p>}
 
