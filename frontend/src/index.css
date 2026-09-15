@@ -1366,3 +1366,74 @@ textarea:focus-visible {
 }
 
 .pdf-btn:disabled { opacity: 0.55; cursor: wait; }
+
+/* ---------- Plain-language timing verdict card ---------- */
+
+.timing-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: linear-gradient(135deg, rgba(198, 255, 78, 0.10), rgba(198, 255, 78, 0.03));
+  border: 1px solid var(--signal-dim);
+  border-radius: var(--radius-m);
+  padding: var(--s-5);
+  margin-bottom: var(--s-4);
+}
+
+.timing-verdict-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+.timing-verdict-main {
+  font-family: var(--font-display);
+  font-size: clamp(24px, 3vw, 32px);
+  font-weight: 700;
+  color: var(--paper);
+  line-height: 1.1;
+}
+
+.timing-verdict-sub {
+  font-size: 14px;
+  color: var(--paper);
+  line-height: 1.6;
+}
+
+.timing-verdict-note {
+  font-size: 12px;
+  color: var(--paper-dim);
+  line-height: 1.5;
+}
+
+.cadence-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: var(--s-4);
+}
+
+.cadence-grid-title {
+  font-size: 13px;
+  color: var(--paper-dim);
+  margin: 0 0 10px;
+}
+
+.timing-explainer {
+  font-size: 13.5px;
+  color: var(--paper-dim);
+  line-height: 1.65;
+  border-left: 2px solid var(--hairline);
+  padding-left: var(--s-3);
+}
+
+.timing-hint {
+  font-size: 12.5px;
+  color: var(--paper-dim);
+  line-height: 1.6;
+  margin: 8px 0 0;
+  padding-left: var(--s-3);
+  border-left: 2px solid var(--hairline);
+}

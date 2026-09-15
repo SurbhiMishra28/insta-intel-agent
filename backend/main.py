@@ -484,6 +484,16 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
     storage.record_scan(main_insight)  # best-effort
     history_records, previous = storage.get_history(main_insight.profile.username)
 
+    # Monthly review (trajectory of this account's stored scans) — computed
+    # from the history we just refreshed; never blocks the dashboard.
+    review = None
+    try:
+        review = analytics.build_monthly_review(
+            main_insight.profile.username, history_records, main_insight
+        )
+    except Exception:
+        review = None
+
     return GrowthPlanResponse(
         main=main_insight,
         plan=plan,
@@ -498,6 +508,7 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
         hashtag_suggestions=hashtag_suggestions,
         reel_timing=reel_timing,
         trends_result=trend_response,
+        review=review,
         history=history_records,
     )
 
@@ -717,6 +728,37 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
                 parts.append(f'<li><b>{_esc(getattr(a, "title", ""))}</b> — {_esc(getattr(a, "why", getattr(a, "description", "")))}</li>')
             parts.append('</ul>')
 
+    # --- Monthly review (trajectory of stored scans) ---
+    if d.review and d.review.scan_count > 0:
+        rv = d.review
+        parts.append('<h2>Monthly review — trajectory</h2>')
+        parts.append(
+            f'<p class="muted">{rv.scan_count} scan(s) between '
+            f'{_esc(str(rv.period_start)[:10])} and {_esc(str(rv.period_end)[:10])} '
+            f'({rv.span_days} day span).</p>'
+        )
+        if rv.metrics:
+            parts.append(
+                '<table><tr><th>Metric</th><th>Start</th><th>Latest</th><th>Change</th><th>Trend</th></tr>'
+            )
+            for mt in rv.metrics:
+                unit = mt.unit or ''
+                first = f"{mt.first_value:,.1f}{unit}"
+                last = f"{mt.last_value:,.1f}{unit}"
+                change = f"{mt.change:+,.1f}{unit} ({mt.change_pct:+.1f}%)"
+                arrow = {'up': '▲', 'down': '▼', 'flat': '■'}.get(mt.trend, '■')
+                parts.append(
+                    f'<tr><td>{_esc(mt.label)}</td><td>{first}</td><td>{last}</td>'
+                    f'<td>{change}</td><td>{arrow} {_esc(mt.trend)}</td></tr>'
+                )
+            parts.append('</table>')
+        if getattr(rv, 'summary', ''):
+            parts.append(f'<p>{_esc(rv.summary)}</p>')
+        if rv.recommendations:
+            parts.append('<h3>Recommendations from the trajectory</h3><ul>')
+            parts.extend(f'<li>{_esc(x)}</li>' for x in rv.recommendations)
+            parts.append('</ul>')
+
     # --- Scan history ---
     if d.history:
         parts.append('<h2>Scan history</h2><table><tr><th>Date (UTC)</th><th>Followers</th><th>ER %</th><th>Avg likes</th><th>Posts/wk</th></tr>')
@@ -865,8 +907,7 @@ async def monthly_review(req: AnalyzeRequest):
         storage.record_scan(latest_insight)
         records, _previous = storage.get_history(uname)
 
-    review = analytics.build_monthly_review(uname, records, latest_insight)
-    return review
+    return analytics.build_monthly_review(uname, records, latest_insight)
 
 
 @app.get("/api/trends/trending")

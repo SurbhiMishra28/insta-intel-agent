@@ -134,6 +134,7 @@ class GrowthPlanResponse(BaseModel):
     hashtag_suggestions: Optional["HashtagSuggestionResult"] = None
     reel_timing: Optional["ReelTiming"] = None
     trends_result: Optional["TrendsResponse"] = None
+    review: Optional["MonthlyReviewResponse"] = None
     history: List["ScanRecord"] = []
 
 
@@ -170,10 +171,11 @@ class CadenceMap(BaseModel):
 
 
 class ReelsInsights(BaseModel):
-    reels_count: int = 0
+    reels_count: int = 0               # reels in the recent sample (regardless of view data)
+    videos_with_views: int = 0         # subset that exposed real view counts
     avg_views: float = 0
     avg_likes_per_reel: float = 0
-    like_rate_per_view: float = 0      # account's reels like-rate, %
+    like_rate_per_view: float = 0      # account's reels like-rate, % (0 when views hidden)
     niche_like_rate_per_view: float = 0  # pooled rivals' reels like-rate, %
     verdict: str
     tips: List[str] = []

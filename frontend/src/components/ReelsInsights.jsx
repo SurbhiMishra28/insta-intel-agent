@@ -1,20 +1,26 @@
 export default function ReelsInsights({ reels }) {
   if (!reels) return null;
 
-  const stat = (label, value) => (
-    <div className="stat" style={{ minWidth: 110 }}>
+  const stat = (label, value, title) => (
+    <div className="stat" style={{ minWidth: 110 }} title={title}>
       <div className="num" style={{ fontSize: 22 }}>{value}</div>
       <div className="label">{label}</div>
     </div>
   );
 
+  const hasViewData = (reels.videos_with_views ?? (reels.avg_views > 0 ? reels.reels_count : 0)) > 0;
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 12 }}>
         {stat('Reels in sample', reels.reels_count)}
-        {stat('Avg views', reels.avg_views ? reels.avg_views.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—')}
+        {hasViewData
+          ? stat('Avg views', reels.avg_views ? reels.avg_views.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—')
+          : stat('Avg views', 'hidden', 'Instagram (or the data source) does not expose view counts for these reels — engagement below is fully real.')}
         {stat('Avg likes / reel', reels.avg_likes_per_reel ? reels.avg_likes_per_reel.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—')}
-        {stat('Like-rate / view', reels.like_rate_per_view ? `${reels.like_rate_per_view}%` : '—')}
+        {hasViewData
+          ? stat('Like-rate / view', reels.like_rate_per_view ? `${reels.like_rate_per_view}%` : '—')
+          : stat('Like-rate / view', 'n/a', 'Needs view counts, which are hidden for this content — likes/comments analysis below is real.')} 
       </div>
 
       <p className="report-summary">{reels.verdict}</p>

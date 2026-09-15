@@ -1,8 +1,6 @@
 // Posting cadence + weekday×hour timing heatmap.
-// Renders the 7×8 UTC grid from the backend's CadenceMap analytics with a
-// design-system heat ramp (panel → signal green), always-readable cell
-// values, a UTC ↔ local-time toggle, a legend, and a ranked
-// "when to post next" list.
+// Plain-language first: a big "Post next" recommendation card, AM/PM times,
+// a UTC ↔ local toggle, then the detail grid for users who want to explore.
 
 import { useState } from 'react';
 
@@ -15,9 +13,7 @@ const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : 
 const OFF_H = -new Date().getTimezoneOffset() / 60;
 const OFF_FRACTIONAL = Math.abs(OFF_H % 1) > 0.001;
 
-/* Convert one UTC cell (day, hour) to the viewer's local 3-hour bucket.
-   Day shifts when the offset crosses midnight; fractional offsets are
-   snapped to the nearest 3-hour slot (flagged in the footnote). */
+/* Convert one UTC cell (day, hour) to the viewer's local 3-hour bucket. */
 function toLocalBucket(day, hour) {
   const di = DAYS.indexOf(day);
   if (di < 0) return { day, hour };
@@ -49,15 +45,31 @@ function cellsToLocal(cells) {
   }));
 }
 
+const ampm = (h) => {
+  const hh = ((h % 24) + 24) % 24;
+  const suffix = hh < 12 ? 'AM' : 'PM';
+  const base = hh % 12 === 0 ? 12 : hh % 12;
+  return `${base}${suffix}`;
+};
+const windowLabel = (h) => `${ampm(h)}–${ampm(h + 3)}`;
+
 export default function CadenceTimingMap({ cadenceMap }) {
-  const [local, setLocal] = useState(false);
+  const [local, setLocal] = useState(true);
 
   if (!cadenceMap) return null;
 
   const rawCells = cadenceMap.heatmap || [];
 
   if (!cadenceMap.enough_data || rawCells.length === 0) {
-    return <p className="report-summary">{cadenceMap.summary}</p>;
+    return (
+      <div>
+        <p className="report-summary">{cadenceMap.summary}</p>
+        <p className="timing-explainer">
+          This chart appears once a handful of posts with timestamps have been
+          analyzed — it shows which day and hour your audience actually responds to.
+        </p>
+      </div>
+    );
   }
 
   const cells = local ? cellsToLocal(rawCells) : rawCells;
@@ -67,26 +79,42 @@ export default function CadenceTimingMap({ cadenceMap }) {
   const grid = {};
   for (const c of cells) grid[`${c.day}-${c.hour}`] = c;
 
-  // Best day per slot → "when to post next" ranking.
+  // Ranked windows (best per day, so the list mixes days like a schedule).
   const slotRanking = Object.values(
     cells.reduce((acc, c) => {
-      if (!acc[c.hour] || c.engagement > acc[c.hour].engagement) acc[c.hour] = c;
+      if (!acc[c.day] || c.engagement > acc[c.day].engagement) acc[c.day] = c;
       return acc;
     }, {})
   ).sort((a, b) => b.engagement - a.engagement);
 
-  // Best window in the current view (UTC grid ships one; recompute for local).
   const best = cells.reduce((b, c) => (!b || c.engagement > b.engagement ? c : b), null);
-  const strongestKey = best ? `${best.day}-${best.hour}` : null;
+  const bestKey = best ? `${best.day}-${best.hour}` : null;
 
   const zoneLabel = local ? 'your local time' : 'UTC';
   const shift = (h) => String(h).padStart(2, '0');
 
   return (
     <div className="cadence">
-      <div className="cadence-head">
-        <p className="report-summary">{cadenceMap.summary}</p>
-        {OFF_H !== 0 && (
+      {/* ---------- Plain-language recommendation ---------- */}
+      {best && (
+        <div className="timing-verdict">
+          <span className="timing-verdict-kicker">Post next</span>
+          <span className="timing-verdict-main">
+            {best.day} {windowLabel(best.hour)}
+          </span>
+          <span className="timing-verdict-sub">
+            your posts in this window got {best.engagement.toLocaleString()}{' '}
+            likes + comments on average — your strongest of the week.
+          </span>
+          <span className="timing-verdict-note">
+            Times shown in {zoneLabel}. Based on this account's own recent posts, not guesswork.
+          </span>
+        </div>
+      )}
+
+      {/* ---------- Toggle ---------- */}
+      {OFF_H !== 0 && (
+        <div className="cadence-toggle-row">
           <button
             type="button"
             className="cadence-toggle"
@@ -95,15 +123,22 @@ export default function CadenceTimingMap({ cadenceMap }) {
           >
             <span className={local ? '' : 'on'}>UTC</span>
             <span className="cadence-toggle-pill" aria-hidden="true"><span className="cadence-toggle-knob" /></span>
-            <span className={local ? 'on' : ''}>Local</span>
+            <span className={local ? 'on' : ''}>My time</span>
           </button>
-        )}
-      </div>
+          {local && OFF_FRACTIONAL && (
+            <span className="cadence-footnote">offset {OFF_H > 0 ? '+' : ''}{OFF_H}h — snapped to nearest 3-hour window</span>
+          )}
+        </div>
+      )}
 
+      {/* ---------- Detail grid ---------- */}
+      <p className="cadence-grid-title">
+        Every window, {zoneLabel} — brighter green = more likes + comments your posts got:
+      </p>
       <div className="cadence-grid" role="img" aria-label={`Average engagement by weekday and time window in ${zoneLabel}`}>
         <span className="cadence-corner" />
         {SLOT_HOURS.map((h) => (
-          <span key={h} className="cadence-hour">{`${shift(h)}–${shift(h + 3)}h`}</span>
+          <span key={h} className="cadence-hour">{windowLabel(h)}</span>
         ))}
 
         {DAYS.map((day) => (
@@ -113,16 +148,16 @@ export default function CadenceTimingMap({ cadenceMap }) {
               const cell = grid[`${day}-${h}`];
               const eng = cell ? cell.engagement : 0;
               const ratio = cell ? Math.min(1, eng / maxEng) : 0;
-              const eased = ratio ** 0.75; // perceptual ramp
-              const isBest = strongestKey === `${day}-${h}`;
+              const eased = ratio ** 0.75;
+              const isBest = bestKey === `${day}-${h}`;
               return (
                 <div
                   key={h}
                   className={'cadence-cell' + (isBest ? ' is-best' : '') + (!cell ? ' is-empty' : '')}
                   title={
                     cell
-                      ? `${day} ${shift(h)}:00–${shift(h + 3)}:00 ${zoneLabel} · ${cell.engagement.toLocaleString()} avg engagement · ${cell.samples} post${cell.samples === 1 ? '' : 's'}`
-                      : `${day} ${shift(h)}:00–${shift(h + 3)}:00 ${zoneLabel} · no posts in sample`
+                      ? `${day} ${windowLabel(h)} (${zoneLabel}) — posts got ${cell.engagement.toLocaleString()} likes+comments on average, from ${cell.samples} post${cell.samples === 1 ? '' : 's'}`
+                      : `${day} ${windowLabel(h)} (${zoneLabel}) — no posts in the recent sample`
                   }
                   style={cell ? { background: `rgba(198, 255, 78, ${(0.07 + 0.9 * eased).toFixed(3)})` } : undefined}
                 >
@@ -135,29 +170,28 @@ export default function CadenceTimingMap({ cadenceMap }) {
       </div>
 
       <div className="cadence-legend">
-        <span>weaker</span>
+        <span>fewer likes + comments</span>
         <span className="cadence-legend-bar" aria-hidden="true" />
-        <span>stronger</span>
+        <span>more likes + comments</span>
         <span className="cadence-legend-best">⭐ best window</span>
       </div>
 
-      {local && OFF_FRACTIONAL && (
-        <p className="cadence-footnote">Your timezone is offset by {OFF_H > 0 ? '+' : ''}{OFF_H}h — windows are snapped to the nearest 3-hour bucket.</p>
-      )}
-
+      {/* ---------- Ranked list ---------- */}
       <div className="cadence-ranking">
-        <p className="cadence-ranking-title">When to post next — your windows, ranked ({zoneLabel}):</p>
+        <p className="cadence-ranking-title">
+          Your best window for each day ({zoneLabel}):
+        </p>
         {slotRanking.slice(0, 4).map((c, i) => {
-          const isBest = strongestKey === `${c.day}-${c.hour}`;
+          const isBest = bestKey === `${c.day}-${c.hour}`;
           return (
             <div key={`${c.day}-${c.hour}`} className="cadence-rank-row">
               <span className="cadence-rank-idx">{String(i + 1).padStart(2, '0')}</span>
               <span className="cadence-rank-window">
-                {c.day} {shift(c.hour)}:00–{shift(c.hour + 3)}:00
-                {isBest && <span className="cadence-rank-star" title="Best window in the sample"> ⭐</span>}
+                {c.day} {windowLabel(c.hour)}
+                {isBest && <span className="cadence-rank-star" title="Best window of the whole week"> ⭐</span>}
               </span>
               <span className="cadence-rank-meta">
-                {c.engagement.toLocaleString()} avg · {c.samples} post{c.samples === 1 ? '' : 's'}
+                {c.engagement.toLocaleString()} likes + comments · {c.samples} post{c.samples === 1 ? '' : 's'}
               </span>
             </div>
           );

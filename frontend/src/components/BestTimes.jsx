@@ -16,7 +16,13 @@ function Bar({ label, value, max, sub, rank }) {
   );
 }
 
-const SLOT_HOURS = { 0: '00:00–06:00', 6: '06:00–12:00', 12: '12:00–18:00', 18: '18:00–24:00' };
+const ampm = (h) => {
+  const hh = ((h % 24) + 24) % 24;
+  const suffix = hh < 12 ? 'AM' : 'PM';
+  const base = hh % 12 === 0 ? 12 : hh % 12;
+  return `${base}${suffix}`;
+};
+const rangeLabel = (h) => `${ampm(h)}–${ampm(h + 6)}`;
 
 export default function BestTimes({ bestTimes }) {
   if (!bestTimes) return null;
@@ -26,18 +32,24 @@ export default function BestTimes({ bestTimes }) {
     <div>
       <p className="report-summary">{bestTimes.summary}</p>
       {bestTimes.enough_data && slots.length > 0 && (
-        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {slots.map((s, i) => (
-            <Bar
-              key={`${s.hour}-${s.day}`}
-              rank={i + 1}
-              label={`${SLOT_HOURS[s.hour] || `${String(s.hour).padStart(2, '0')}:00`} UTC`}
-              value={s.avg_engagement}
-              max={slots[0].avg_engagement}
-              sub={`${s.avg_engagement.toLocaleString()} avg · ${s.day} · ${s.samples} post${s.samples === 1 ? '' : 's'}`}
-            />
-          ))}
-        </div>
+        <>
+          <p className="timing-hint">
+            Wider bar = your posts got more likes + comments in that 6-hour window.
+            #1 is your strongest.
+          </p>
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {slots.map((s, i) => (
+              <Bar
+                key={`${s.hour}-${s.day}`}
+                rank={i + 1}
+                label={rangeLabel(s.hour)}
+                value={s.avg_engagement}
+                max={slots[0].avg_engagement}
+                sub={`${s.avg_engagement.toLocaleString()} avg · ${s.day} · ${s.samples} post${s.samples === 1 ? '' : 's'}`}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

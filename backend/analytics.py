@@ -265,12 +265,19 @@ def explain_account_score(insight: ProfileInsight) -> dict:
 
 
 def compute_reels(insight: ProfileInsight, rivals: Optional[List[ProfileInsight]] = None) -> ReelsInsights:
-    reels = [
+    """Reels performance from the account's real recent posts.
+
+    View counts are only exposed by some data sources (the permalink
+    fallback never carries them), so "no views" must not be read as "no
+    reels": reels without view data still have real likes/comments and are
+    analyzed on engagement, with an honest note that views are hidden."""
+    all_reels = [
         p for p in insight.profile.recent_posts
-        if p.media_type in ("reel", "video") and p.views > 0
+        if p.media_type in ("reel", "video")
     ]
+    reels = [p for p in all_reels if p.views > 0]  # subset with real view data
     account_views = sum(p.views for p in reels)
-    account_likes = sum(p.likes for p in reels)
+    account_likes = sum(p.likes for p in all_reels)
     account_rate = (account_likes / account_views * 100) if account_views else 0.0
 
     niche_likes, niche_views = 0, 0
@@ -282,9 +289,10 @@ def compute_reels(insight: ProfileInsight, rivals: Optional[List[ProfileInsight]
     niche_rate = (niche_likes / niche_views * 100) if niche_views else 0.0
 
     tips: List[str] = []
-    if not reels:
+    if not all_reels:
+        # Genuinely no reels in the sample — the reach-lever advice stands.
         verdict = (
-            "No reels with view data in the last 12 posts - this account is leaving "
+            "No reels in the recent posts — this account is leaving "
             "the strongest reach lever unused."
         )
         tips = [
@@ -292,9 +300,35 @@ def compute_reels(insight: ProfileInsight, rivals: Optional[List[ProfileInsight]
             "Reuse the account's best-performing static concepts as short vertical videos.",
         ]
         return ReelsInsights(
-            reels_count=0, avg_views=0, avg_likes_per_reel=0,
+            reels_count=0, videos_with_views=0, avg_views=0, avg_likes_per_reel=0,
             like_rate_per_view=0, niche_like_rate_per_view=round(niche_rate, 3),
             verdict=verdict, tips=tips,
+        )
+
+    avg_likes = account_likes / len(all_reels)
+
+    if not reels:
+        # Reels exist but the source hid view counts (Instagram hides views
+        # on some content, and permalink metadata never carries them).
+        # Engagement analysis stays fully real; only view-rate is unknown.
+        top = max(all_reels, key=lambda p: p.likes)
+        verdict = (
+            f"{len(all_reels)} reel(s) in the recent sample averaging "
+            f"{avg_likes:,.0f} likes and "
+            f"{sum(p.comments for p in all_reels) / len(all_reels):,.0f} comments. "
+            "View counts are hidden for this content, so like-rate-per-view "
+            "can't be computed — engagement analysis below uses real likes/comments only."
+        )
+        tips = [
+            f"Top reel pulled {top.likes:,} likes — reuse its concept as a repeatable format.",
+            "Views are hidden on these reels; track them in the Instagram app to compare reach vs engagement.",
+            "Add on-screen text: most feed viewers watch reels muted.",
+        ]
+        return ReelsInsights(
+            reels_count=len(all_reels), videos_with_views=0,
+            avg_views=0, avg_likes_per_reel=round(avg_likes, 1),
+            like_rate_per_view=0, niche_like_rate_per_view=round(niche_rate, 3),
+            verdict=verdict, tips=tips[:5],
         )
 
     avg_views = account_views / len(reels)
@@ -323,7 +357,8 @@ def compute_reels(insight: ProfileInsight, rivals: Optional[List[ProfileInsight]
     tips.append("Add on-screen text: most feed viewers watch reels muted.")
     tips.append("End with a question or 'comment X for the guide' to convert views into comments.")
     return ReelsInsights(
-        reels_count=len(reels),
+        reels_count=len(all_reels),
+        videos_with_views=len(reels),
         avg_views=round(avg_views, 1),
         avg_likes_per_reel=round(avg_likes, 1),
         like_rate_per_view=round(account_rate, 3),
