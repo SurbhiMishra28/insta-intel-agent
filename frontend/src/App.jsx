@@ -73,7 +73,6 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [stage, setStage] = useState('');
   const [error, setError] = useState('');
-  const [dataMode, setDataMode] = useState('');
 
   // One dashboard: everything the agent produces.
   const [dash, setDash] = useState(null);
@@ -85,13 +84,6 @@ export default function App() {
   const [trendsData, setTrendsData] = useState(null);
   const [busy, setBusy] = useState({}); // { research: bool, review: bool, ... }
   const [pdfBusy, setPdfBusy] = useState(false);
-
-  useEffect(() => {
-    fetch(`${API_URL}/`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setDataMode(d?.data_mode || ''))
-      .catch(() => {});
-  }, []);
 
   const post = async (path, body) => {
     const res = await fetch(`${API_URL}${path}`, {
@@ -474,16 +466,6 @@ export default function App() {
       )}
 
       <PWAInstallBanner />
-
-      <footer className="footer-note">
-        {dataMode === 'live'
-          ? 'Data mode: live — real Instagram data (Apify + keyless fallback), cached locally; AI by NVIDIA NIM.'
-          : dataMode === 'cache'
-          ? 'Data mode: cache — real cached Instagram data; AI by NVIDIA NIM.'
-          : dataMode === 'demo'
-          ? 'Data mode: demo — simulated profiles for offline development.'
-          : ''}
-      </footer>
     </div>
   );
 }
