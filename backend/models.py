@@ -39,6 +39,8 @@ class ProfileMetrics(BaseModel):
     follower_following_ratio: float
     top_hashtags: List[str]
     best_content_type: str
+    avg_views: float = 0        # avg video/reel views (0 when none in sample)
+    reels_count: int = 0        # reels/videos with real view data in the sample
 
 
 class ProfileInsight(BaseModel):
@@ -48,6 +50,7 @@ class ProfileInsight(BaseModel):
     strengths: List[str]
     weaknesses: List[str]
     recommendations: List[str]
+    account_score: Optional[int] = None  # 0-100, computed from real data (size-aware)
 
 
 class AnalyzeRequest(BaseModel):
@@ -122,6 +125,7 @@ class GrowthPlanResponse(BaseModel):
     plan: GrowthPlan
     rivals: List[ProfileInsight] = []  # researched competitors used as grounding (if any)
     warnings: List[str] = []
+    score_explanation: Optional["ScoreExplanation"] = None
     best_times: Optional["BestTimes"] = None
     cadence_map: Optional["CadenceMap"] = None
     reels: Optional["ReelsInsights"] = None
@@ -343,6 +347,13 @@ class WhitespaceResponse(BaseModel):
     captions: List[CaptionSuggestion] = []
     summary: str = ""
     warnings: List[str] = []
+
+
+class ScoreExplanation(BaseModel):
+    """What lifted or dragged the account's 0-100 score, from real data."""
+    total: int
+    drivers: List[str] = []
+    drainers: List[str] = []
 
 
 # Resolve forward references (BestTimes etc. are defined from here on).

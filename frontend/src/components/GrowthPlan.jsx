@@ -3,9 +3,9 @@ import FollowerGrowthIcon from './FollowerGrowthIcon.jsx';
 export default function GrowthPlan({ plan }) {
   const fmtChip = (f) => {
     const colors = {
-      reel: '#ff2e63', video: '#ff2e63', carousel: '#7c5cff', image: '#3ddc97',
+      reel: 'var(--acc-rose)', video: 'var(--acc-rose)', carousel: 'var(--acc-violet)', image: 'var(--acc-green)',
     };
-    const bg = colors[f?.toLowerCase()] || '#3A3F45';
+    const bg = colors[f?.toLowerCase()] || 'var(--hairline)';
     return (
       <span style={{
         background: bg, color: '#fff', fontSize: 10, fontWeight: 700,
@@ -37,15 +37,15 @@ export default function GrowthPlan({ plan }) {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
             {plan.post_ideas.map((idea, i) => (
               <div key={i} style={{
-                border: '1px solid #2A2F3A', borderRadius: 8, padding: '12px 14px',
-                background: '#141824',
+                border: '1px solid var(--hairline)', borderRadius: 8, padding: '12px 14px',
+                background: 'var(--panel)',
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <strong style={{ fontSize: 13.5, fontFamily: 'var(--font-display)' }}>{idea.title}</strong>
                   {fmtChip(idea.format)}
                 </div>
-                <p style={{ fontSize: 12.5, color: '#9CA1A6', margin: '0 0 6px' }}>{idea.why}</p>
-                <p style={{ fontSize: 12.5, color: '#C7CCD6', margin: '0 0 8px', fontStyle: 'italic' }}>{idea.caption_concept}</p>
+                <p style={{ fontSize: 12.5, color: 'var(--paper-dim)', margin: '0 0 6px' }}>{idea.why}</p>
+                <p style={{ fontSize: 12.5, color: 'var(--paper)', margin: '0 0 8px', fontStyle: 'italic' }}>{idea.caption_concept}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {idea.hashtags?.slice(0, 6).map((h) => (
                     <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>
@@ -72,7 +72,7 @@ export default function GrowthPlan({ plan }) {
             <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, margin: '6px 0 6px' }}>Rotating hashtag sets</h3>
             {plan.hashtag_sets.map((set, i) => (
               <div key={i} style={{ marginBottom: 8 }}>
-                <p style={{ fontSize: 11, color: '#9CA1A6', margin: '0 0 4px' }}>Set {i + 1} — rotate to avoid flagging:</p>
+                <p style={{ fontSize: 11, color: 'var(--paper-dim)', margin: '0 0 4px' }}>Set {i + 1} — rotate to avoid flagging:</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {set.map((h) => <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>)}
                 </div>

@@ -1,46 +1,41 @@
-# Render Blueprint — one-click deploy for the InstaIQ backend.
-# Render reads this file when you choose "New +" → "Blueprint" on this repo.
+# Render deployment — backend API (FastAPI + Docker)
+# In the Render dashboard: New → Blueprint → pick this repo; Render reads
+# this file and creates the service. Set the env vars marked "sync: false"
+# in the dashboard (never commit real keys).
+#
+# Required environment variable (set in the Render dashboard):
+#   LLM_API_KEY   — NVIDIA NIM key (https://build.nvidia.com), nvapi-...
+# Optional:
+#   APIFY_TOKEN   — enables the Apify provider (keyless fallback works without)
 services:
   - type: web
-    name: instaiq-backend
-    runtime: python
-    rootDir: backend
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    name: insta-intel-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
     healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: insta-cache
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
-      - key: PYTHON_VERSION
-        value: "3.13.4"
-      # Live public Instagram data via the Apify API (token below); every
-      # fetch is cached so repeat analyses are instant and free.
+      - key: LLM_API_KEY
+        sync: false          # set in dashboard: NVIDIA NIM key
+      - key: APIFY_TOKEN
+        sync: false          # optional; keyless fallback works without it
       - key: DATA_MODE
         value: live
-      # All AI analysis runs on NVIDIA NIM.
-      - key: LLM_BASE_URL
-        value: https://integrate.api.nvidia.com/v1
-      - key: LLM_MODEL
-        value: openai/gpt-oss-20b
-      # Apify — live Instagram data. Set the real token in the Render
-      # dashboard (instaiq-backend → Environment) after the first deploy.
-      - key: APIFY_TOKEN
-        value: your_apify_token_here
-      # Secret: set this in the Render dashboard after the first deploy
-      # (marked sync:false so the blueprint never hardcodes it).
-      - key: LLM_API_KEY
-        sync: false
-
-  - type: web
-    name: instaiq-frontend
-    runtime: static
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      # The static frontend calls the backend service directly.
-      - key: VITE_API_URL
-        value: https://instaiq-backend.onrender.com
+      # Persistent cache DBs live on the mounted disk so restarts keep data.
+      - key: PROFILE_CACHE_DB
+        value: /app/data/profile_cache.db
+      - key: SCAN_HISTORY_DB
+        value: /app/data/scan_history.db
+      # Headless Chrome (keyless fallback layer) tuning on a small container.
+      - key: IG_CHROME_FETCH
+        value: "true"
+      - key: IG_PERMALINK_POSTS
+        value: "4"
+      - key: FALLBACK_TO_DEMO
+        value: "false"

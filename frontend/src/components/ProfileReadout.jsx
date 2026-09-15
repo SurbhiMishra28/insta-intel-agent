@@ -6,8 +6,50 @@ function fmt(n) {
   return String(n);
 }
 
-export default function ProfileReadout({ insight }) {
-  const { profile, metrics } = insight;
+/* Compact mode: rendered INSIDE the dashboard hero card. Shows only the
+   metrics the hero card itself does not already display, so the profile
+   appears exactly once on the page. */
+function CompactReadout({ profile, metrics }) {
+  return (
+    <div className="readout-compact">
+      <div className="stat-grid">
+        <div className="stat">
+          <div className="num">{fmt(profile.following)}</div>
+          <div className="label">Following</div>
+        </div>
+        <div className="stat">
+          <div className="num">{fmt(Math.round(metrics.avg_likes))}</div>
+          <div className="label">Avg. likes / post</div>
+        </div>
+        {metrics.reels_count > 0 && (
+          <div className="stat">
+            <div className="num">{metrics.reels_count}</div>
+            <div className="label">Reels (sampled)</div>
+            {metrics.avg_views > 0 && (
+              <div className="label" style={{ fontSize: 11, opacity: 0.7 }}>
+                {fmt(Math.round(metrics.avg_views))} avg views
+              </div>
+            )}
+          </div>
+        )}
+        <div className="stat">
+          <div className="num" style={{ textTransform: 'capitalize' }}>{metrics.best_content_type}</div>
+          <div className="label">Top format</div>
+        </div>
+      </div>
+      {metrics.top_hashtags?.length > 0 && (
+        <div className="hashtag-row">
+          {metrics.top_hashtags.map((h) => (
+            <span className="hashtag-chip" key={h}>{h}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Full mode: standalone card used for rival readouts in competitor research. */
+function FullReadout({ profile, metrics }) {
   return (
     <div className="readout">
       <div className="profile-id">
@@ -76,9 +118,28 @@ export default function ProfileReadout({ insight }) {
           <div className="label">Total posts</div>
         </div>
         <div className="stat">
+          <div className="num">{fmt(profile.following)}</div>
+          <div className="label">Following</div>
+        </div>
+        <div className="stat">
           <div className="num">{fmt(Math.round(metrics.avg_likes))}</div>
           <div className="label">Avg. likes / post</div>
         </div>
+        <div className="stat">
+          <div className="num">{fmt(Math.round(metrics.avg_comments || 0))}</div>
+          <div className="label">Avg. comments / post</div>
+        </div>
+        {metrics.reels_count > 0 && (
+          <div className="stat">
+            <div className="num">{metrics.reels_count}</div>
+            <div className="label">Reels (sampled)</div>
+            {metrics.avg_views > 0 && (
+              <div className="label" style={{ fontSize: 11, opacity: 0.7 }}>
+                {fmt(Math.round(metrics.avg_views))} avg views
+              </div>
+            )}
+          </div>
+        )}
         <div className="stat">
           <div className="num">{metrics.posting_frequency_per_week}</div>
           <div className="label">Posts / week</div>
@@ -90,4 +151,12 @@ export default function ProfileReadout({ insight }) {
       </div>
     </div>
   );
+}
+
+export default function ProfileReadout({ insight, compact = false }) {
+  if (!insight) return null;
+  const { profile, metrics } = insight;
+  return compact
+    ? <CompactReadout profile={profile} metrics={metrics} />
+    : <FullReadout profile={profile} metrics={metrics} />;
 }

@@ -188,8 +188,81 @@ def compute_cadence_map(insight: ProfileInsight) -> CadenceMap:
 
 
 # ---------------------------------------------------------------------------
+# Account score explanation (deterministic, mirrors ai_engine's channels)
+# ---------------------------------------------------------------------------
+
+def explain_account_score(insight: ProfileInsight) -> dict:
+    """Data-grounded explanation for the 0-100 account score. Recomputes the
+    same per-channel subscores ai_engine uses (kept aligned by importing
+    them) and returns the total with what each channel contributed."""
+    try:
+        from ai_engine import _score_channels
+        c = _score_channels(insight.profile, insight.metrics)
+    except Exception:
+        c = {"er": 0, "cadence": 0, "comments": 0, "ffr": 0, "reels": 0, "verified": 0}
+
+    import math
+    p, m = insight.profile, insight.metrics
+    expected_er = (
+        max(0.4, 6.0 - 1.0 * (math.log10(max(p.followers, 10)) - 2.0))
+        if p.followers > 0 else 0.0
+    )
+
+    drivers: List[str] = []
+    drainers: List[str] = []
+
+    er_pct = round(c["er"] * 100)
+    if er_pct >= 70:
+        drivers.append(
+            f"Engagement rate {m.engagement_rate}% is strong for a {p.followers:,}-follower "
+            f"account (peers average ~{expected_er:.1f}%)."
+        )
+    elif er_pct <= 30 and p.followers > 0:
+        drainers.append(
+            f"Engagement rate {m.engagement_rate}% is below the ~{expected_er:.1f}% typical "
+            f"for accounts this size — content isn't reaching the follower base."
+        )
+
+    cad_pct = round(c["cadence"] * 100)
+    if cad_pct >= 75:
+        drivers.append(f"Posting cadence of {m.posting_frequency_per_week}/week keeps the account active in the algorithm.")
+    elif cad_pct <= 30:
+        drainers.append(f"Only {m.posting_frequency_per_week} posts/week — cadence below ~4/week leaves reach on the table.")
+
+    com_pct = round(c["comments"] * 100)
+    if com_pct >= 60:
+        drivers.append(f"Comments average {m.avg_comments:,.0f}/post — a real community signal that likes alone don't prove.")
+    elif com_pct <= 25:
+        drainers.append(f"Comments average only {m.avg_comments:,.0f}/post — add questions/CTAs to convert viewers into commenters.")
+
+    if m.reels_count == 0:
+        drainers.append("No reels with view data in the recent sample — the strongest reach format is unused.")
+    elif c["reels"] >= 0.6:
+        drivers.append(f"Reels average {m.avg_views:,.0f} views — video reach is compounding.")
+
+    if m.follower_following_ratio < 1:
+        drainers.append(f"Follows more accounts ({p.following:,}) than it has followers ({p.followers:,}) — reads as low authority.")
+
+    if not drivers:
+        drivers.append("Baseline is workable — the fixes above compound fastest on an active account.")
+    if not drainers:
+        drainers.append("No major drainers in this sample — scale what is already working.")
+
+    total = (
+        40 * c["er"] + 20 * c["cadence"] + 15 * c["comments"]
+        + 10 * c["ffr"] + 10 * c["reels"] + 5 * c["verified"]
+    )
+    return {
+        "total": int(round(max(0.0, min(100.0, total)))),
+        "drivers": drivers,
+        "drainers": drainers,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reels deep-dive (views + like-rate per view vs niche)
 # ---------------------------------------------------------------------------
+
 
 def compute_reels(insight: ProfileInsight, rivals: Optional[List[ProfileInsight]] = None) -> ReelsInsights:
     reels = [

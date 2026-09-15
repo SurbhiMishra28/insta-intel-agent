@@ -116,7 +116,7 @@ def _get_llm(temperature: float = LLM_TEMPERATURE):
         base_url=LLM_BASE_URL or None,
         temperature=temperature,
         max_retries=1,
-        timeout=int(os.getenv("LLM_TIMEOUT", "45")),
+        timeout=int(os.getenv("LLM_TIMEOUT", "90")),  # NIM cold starts can exceed 45s
         # Bounds hidden reasoning + output; too small truncates the JSON and
         # forces wasteful retries, too big lets a chain hog the request.
         max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4000")),
@@ -160,6 +160,9 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
             hashtag_counts[h] = hashtag_counts.get(h, 0) + 1
     top_hashtags = sorted(hashtag_counts, key=hashtag_counts.get, reverse=True)[:5]
 
+    avg_views = statistics.mean(p.views for p in posts)  # 0 for non-video posts
+    reels_count = sum(1 for p in posts if p.media_type in ("reel", "video") and p.views > 0)
+
     engagement_by_type = {}
     for p in posts:
         engagement_by_type.setdefault(p.media_type, []).append(p.likes + p.comments)
@@ -175,6 +178,8 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
         follower_following_ratio=follower_following_ratio,
         top_hashtags=top_hashtags,
         best_content_type=best_content_type,
+        avg_views=round(avg_views, 1),
+        reels_count=reels_count,
     )
 
 
@@ -321,6 +326,7 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
             strengths=narrative.strengths,
             weaknesses=narrative.weaknesses,
             recommendations=narrative.recommendations,
+            account_score=account_score_from(profile, metrics),
         )
 
     key = _insight_memo_key(profile)
@@ -349,6 +355,7 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
         strengths=narrative.strengths,
         weaknesses=narrative.weaknesses,
         recommendations=narrative.recommendations,
+        account_score=account_score_from(profile, metrics),
     )
     _INSIGHT_MEMO[key] = insight
     if len(_INSIGHT_MEMO) > 200:  # bounded
@@ -361,13 +368,89 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
 # ---------------------------------------------------------------------------
 
 def composite_score(insight: ProfileInsight) -> float:
-    """Single sortable number for ranking accounts against each other."""
-    m = insight.metrics
-    return (
-        m.engagement_rate * 10
-        + m.posting_frequency_per_week * 2
-        + (5 if insight.profile.is_verified else 0)
+    """Single sortable number for ranking accounts against each other.
+    Uses the same size-aware 0-100 account score shown in the UI, so the
+    ranking bars and hero score can never disagree."""
+    return float(account_score_from(insight.profile, insight.metrics))
+
+
+# ---------------------------------------------------------------------------
+# Account score (0-100) — deterministic, size-aware, computed from the
+# account's REAL fetched data only. Every channel is normalized within a
+# realistic band instead of raw values, so a 57-follower local business and
+# a 100M-follower brand are both graded on what they actually control.
+# ---------------------------------------------------------------------------
+
+def _score_channels(profile: ProfileData, m: ProfileMetrics) -> dict:
+    """Per-channel 0-1 subscores behind account_score_from. Exposed so the
+    analytics layer can explain the score without duplicating the math.
+    Channels (each clamped to its own 0-1 normalization band):
+      - engagement_rate vs follower size: small accounts can hit 5-10%+
+        organically; mega-accounts rarely exceed 1-2%. The expected ER
+        floor DROPS as followers grow, and the score measures performance
+        RELATIVE to that expectation (x40 weight).
+      - posting cadence: 4+/week saturates the channel (x20).
+      - comment depth: comments-per-post vs followers (x15) — a genuine
+        community signal that cannot be bought as cheaply as likes.
+      - follower-following ratio: >=3:1 saturates (x10).
+      - reels usage: any reels with real view data in the sample earn the
+        channel; avg views add up to the cap (x10).
+      - verification: small fixed bonus (x5).
+    """
+    p = profile
+
+    # --- Engagement rate vs size-adjusted expectation (40) ---
+    if p.followers <= 0:
+        er_score = 0.0
+    else:
+        import math
+        log10f = math.log10(max(p.followers, 10))
+        expected_er = max(0.4, 6.0 - 1.0 * (log10f - 2.0))  # 6% @1K -> 0.4% @30M+
+        ratio = m.engagement_rate / expected_er
+        er_score = min(1.0, ratio / 1.5)  # 1.5x expectation = full marks
+
+    # --- Posting cadence (20) ---
+    cadence_score = min(1.0, m.posting_frequency_per_week / 4.0)
+
+    # --- Comment depth (15): comments per 1K followers ---
+    if p.followers >= 100:
+        cpk = m.avg_comments / (p.followers / 1000.0)
+        comment_score = min(1.0, cpk / 0.6)  # 0.6 comments/1K followers = full
+    else:
+        # Tiny accounts: absolute comments still show a real community.
+        comment_score = min(1.0, m.avg_comments / 1.5)
+
+    # --- Follower:following ratio (10) ---
+    ffr_score = min(1.0, m.follower_following_ratio / 3.0)
+
+    # --- Reels/views (10) ---
+    reels_score = 0.0
+    if m.reels_count > 0:
+        reels_score = 0.4
+        reels_score += 0.6 * min(1.0, m.avg_views / max(p.followers * 0.2, 1.0))
+
+    # --- Verified (5) ---
+    verified_score = 1.0 if p.is_verified else 0.0
+
+    return {
+        "er": er_score, "cadence": cadence_score, "comments": comment_score,
+        "ffr": ffr_score, "reels": reels_score, "verified": verified_score,
+    }
+
+
+def account_score_from(profile: ProfileData, m: ProfileMetrics) -> int:
+    """0-100 quality score for one account, from real data only."""
+    c = _score_channels(profile, m)
+    total = (
+        40 * c["er"] + 20 * c["cadence"] + 15 * c["comments"]
+        + 10 * c["ffr"] + 10 * c["reels"] + 5 * c["verified"]
     )
+    return int(round(max(0.0, min(100.0, total))))
+
+
+def compute_account_score(insight: ProfileInsight) -> int:
+    """Insight-based wrapper around account_score_from."""
+    return account_score_from(insight.profile, insight.metrics)
 
 
 # ---------------------------------------------------------------------------

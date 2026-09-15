@@ -2,6 +2,9 @@ export default function RankingBars({ ranking, allInsights, mainUsername }) {
   const scoreOf = (username) => {
     const insight = allInsights.find((i) => i.profile.username === username);
     if (!insight) return 0;
+    // Backend-computed size-aware score (same value that orders `ranking`).
+    if (insight.account_score != null) return insight.account_score;
+    // Legacy fallback for responses computed before the backend score existed.
     const m = insight.metrics;
     return Math.round(m.engagement_rate * 10 + m.posting_frequency_per_week * 2 + (insight.profile.is_verified ? 5 : 0));
   };

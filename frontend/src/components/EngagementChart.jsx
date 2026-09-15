@@ -15,7 +15,7 @@ export default function EngagementChart({ allInsights, mainUsername }) {
           <XAxis dataKey="name" tick={{ fill: '#9CA1A6', fontSize: 12 }} axisLine={{ stroke: '#33383D' }} tickLine={false} />
           <YAxis tick={{ fill: '#9CA1A6', fontSize: 12 }} axisLine={false} tickLine={false} unit="%" />
           <Tooltip
-            contentStyle={{ background: '#1D2023', border: '1px solid #33383D', borderRadius: 4, fontSize: 13 }}
+            contentStyle={{ background: 'var(--panel)', border: '1px solid #33383D', borderRadius: 4, fontSize: 13 }}
             labelStyle={{ color: '#ECEAE4' }}
             formatter={(value) => [`${value}%`, 'Engagement rate']}
           />

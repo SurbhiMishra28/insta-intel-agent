@@ -1,14 +1,14 @@
 function impactBadge(impact) {
   const colors = {
-    high: '#3ddc97',
-    medium: '#7c5cff',
-    low: '#ff2e63',
+    high: 'var(--acc-green)',
+    medium: 'var(--acc-violet)',
+    low: 'var(--acc-rose)',
   };
   return (
     <span style={{
       fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 8,
-      background: (colors[impact] || '#9CA1A6') + '22',
-      color: colors[impact] || '#9CA1A6',
+      background: (colors[impact] || 'var(--paper-dim)') + '22',
+      color: colors[impact] || 'var(--paper-dim)',
     }}>
       {impact}
     </span>

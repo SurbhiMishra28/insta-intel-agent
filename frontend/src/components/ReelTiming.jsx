@@ -1,27 +1,25 @@
-function SlotCard({ slot, rank }) {
-  const activityColor = {
-    low: '#3ddc97',
-    medium: '#7c5cff',
-    high: '#ff2e63',
-  }[slot.competitor_activity] || '#9CA1A6';
+function SlotRow({ slot, rank }) {
+  const heat = {
+    low: { c: 'var(--acc-green)', label: 'low competition' },
+    medium: { c: 'var(--acc-violet)', label: 'medium competition' },
+    high: { c: 'var(--acc-rose)', label: 'high competition' },
+  }[slot.competitor_activity] || { c: 'var(--paper-dim)', label: 'competition' };
 
   return (
-    <div style={{
-      border: '1px solid var(--hairline)', borderRadius: 8, padding: '12px 14px',
-      background: '#141824', marginBottom: 10,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <strong style={{ fontSize: 13.5, fontFamily: 'var(--font-display)' }}>
-          #{rank} · {slot.day} {String(slot.hour).padStart(2, '0')}:00–{String(slot.hour + 3).padStart(2, '0')}:00 UTC
-        </strong>
-        <span style={{
-          fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 10,
-          background: activityColor + '22', color: activityColor, textTransform: 'uppercase',
-        }}>
-          {slot.competitor_activity} competition
-        </span>
+    <div className="rt-row">
+      <span className="rt-rank">{String(rank).padStart(2, '0')}</span>
+      <div className="rt-main">
+        <div className="rt-head">
+          <span className="rt-window">
+            {slot.day} {String(slot.hour).padStart(2, '0')}:00–{String(slot.hour + 3).padStart(2, '0')}:00
+          </span>
+          <span className="rt-badge" style={{ color: heat.c }}>
+            <span className="rt-pip" style={{ background: heat.c }} />
+            {heat.label}
+          </span>
+        </div>
+        <p className="rt-why">{slot.rationale}</p>
       </div>
-      <p style={{ fontSize: 12.5, color: '#C7CCD6', margin: 0, lineHeight: 1.5 }}>{slot.rationale}</p>
     </div>
   );
 }
@@ -34,19 +32,15 @@ export default function ReelTimingView({ reelTiming }) {
     <div>
       <p className="report-summary">{reelTiming.summary}</p>
       {reelTiming.current_reel_cadence && (
-        <p style={{ fontSize: 12.5, color: 'var(--paper-dim)', margin: '4px 0 10px' }}>
-          Current reel cadence: {reelTiming.current_reel_cadence}
-        </p>
+        <p className="rt-cadence">Current reel cadence: {reelTiming.current_reel_cadence}</p>
       )}
       {!reelTiming.enough_data && slots.length === 0 && (
-        <p style={{ fontSize: 12.5, color: 'var(--paper-dim)', fontStyle: 'italic' }}>
-          Start posting reels to unlock whitespace analysis.
-        </p>
+        <p className="rt-empty">Start posting reels to unlock whitespace analysis.</p>
       )}
       {slots.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div className="rt-list">
           {slots.map((s, i) => (
-            <SlotCard key={`${s.day}-${s.hour}`} slot={s} rank={i + 1} />
+            <SlotRow key={`${s.day}-${s.hour}`} slot={s} rank={i + 1} />
           ))}
         </div>
       )}

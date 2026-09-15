@@ -35,7 +35,7 @@ function BioOptimizerView({ bio }) {
 
 function HashtagResearchView({ hashtags }) {
   if (!hashtags) return null;
-  const tierColor = { rare: '#3ddc97', mid: '#7c5cff', broad: '#ff2e63' };
+  const tierColor = { rare: 'var(--acc-green)', mid: 'var(--acc-violet)', broad: 'var(--acc-rose)' };
   return (
     <div>
       <p className="report-summary">{hashtags.summary}</p>

@@ -26,3 +26,6 @@ backend/_t*.json
 backend/_e2e.json
 backend/_v*.json
 backend/_verify_*.json
+
+# Vite PWA dev artifacts
+frontend/dev-dist/

@@ -1,15 +1,15 @@
 import { useState } from 'react';
 
 function TrendArrow({ trend }) {
-  if (trend === 'up') return <span style={{ color: '#C6FF4E', fontSize: 12 }}>&#9650;</span>;
+  if (trend === 'up') return <span style={{ color: 'var(--signal)', fontSize: 12 }}>&#9650;</span>;
   if (trend === 'down') return <span style={{ color: '#FF5C72', fontSize: 12 }}>&#9660;</span>;
-  return <span style={{ color: '#9CA1A6', fontSize: 12 }}>&#9644;</span>;
+  return <span style={{ color: 'var(--paper-dim)', fontSize: 12 }}>&#9644;</span>;
 }
 
 function MetricCard({ metric, index }) {
   const isUp = metric.trend === 'up';
   const isDown = metric.trend === 'down';
-  const borderColor = isUp ? '#C6FF4E' : isDown ? '#FF5C72' : '#3A3F45';
+  const borderColor = isUp ? 'var(--signal)' : isDown ? '#FF5C72' : 'var(--hairline)';
   const barWidth = Math.min(100, Math.abs(metric.change_pct) * 3);
 
   return (
@@ -17,7 +17,7 @@ function MetricCard({ metric, index }) {
       style={{
         borderLeft: `3px solid ${borderColor}`,
         padding: '14px 16px',
-        background: '#141824',
+        background: 'var(--panel)',
         borderRadius: 6,
         marginBottom: 12,
       }}
@@ -34,18 +34,18 @@ function MetricCard({ metric, index }) {
           <span style={{ fontSize: 24, fontWeight: 700, fontFamily: 'var(--font-display)', color: '#fff' }}>
             {metric.last_value.toLocaleString()}
           </span>
-          <span style={{ fontSize: 13, color: '#9CA1A6', marginLeft: 4 }}>
+          <span style={{ fontSize: 13, color: 'var(--paper-dim)', marginLeft: 4 }}>
             {metric.unit}
           </span>
         </div>
         <div style={{ textAlign: 'right' }}>
           <span style={{
             fontSize: 14, fontWeight: 600,
-            color: isUp ? '#C6FF4E' : isDown ? '#FF5C72' : '#9CA1A6',
+            color: isUp ? 'var(--signal)' : isDown ? '#FF5C72' : 'var(--paper-dim)',
           }}>
             {metric.change > 0 ? '+' : ''}{metric.change} {metric.unit}
           </span>
-          <span style={{ fontSize: 12, color: '#9CA1A6', marginLeft: 4 }}>
+          <span style={{ fontSize: 12, color: 'var(--paper-dim)', marginLeft: 4 }}>
             ({metric.change_pct > 0 ? '+' : ''}{metric.change_pct}%)
           </span>
         </div>
@@ -53,22 +53,22 @@ function MetricCard({ metric, index }) {
 
       <div style={{ marginTop: 8 }}>
         <div style={{
-          height: 4, background: '#23272B', borderRadius: 2, overflow: 'hidden',
+          height: 4, background: 'var(--panel-raised)', borderRadius: 2, overflow: 'hidden',
         }}>
           <div style={{
             height: '100%',
             width: isUp || isDown ? `${barWidth}%` : '2px',
-            background: isUp ? '#C6FF4E' : isDown ? '#FF5C72' : '#3A3F45',
+            background: isUp ? 'var(--signal)' : isDown ? '#FF5C72' : 'var(--hairline)',
             marginLeft: metric.change < 0 ? 'auto' : '0',
             marginRight: metric.change < 0 ? '0' : 'auto',
             transition: 'width 0.6s ease',
           }} />
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-          <span style={{ fontSize: 11, color: '#9CA1A6' }}>
+          <span style={{ fontSize: 11, color: 'var(--paper-dim)' }}>
             {metric.first_value.toLocaleString()} {metric.unit} (start)
           </span>
-          <span style={{ fontSize: 11, color: '#9CA1A6' }}>
+          <span style={{ fontSize: 11, color: 'var(--paper-dim)' }}>
             {metric.samples} scans
           </span>
         </div>
@@ -128,11 +128,11 @@ export default function MonthlyReviewer({ review }) {
       {/* Summary */}
       <div style={{
         marginTop: 24, padding: '16px 20px',
-        background: '#1D2023', border: '1px solid var(--hairline)',
+        background: 'var(--panel)', border: '1px solid var(--hairline)',
         borderRadius: 6,
       }}>
-        <p style={{ fontSize: 13, fontWeight: 600, color: '#C6FF4E', margin: '0 0 8px' }}>ANALYST SUMMARY</p>
-        <p style={{ fontSize: 14, color: '#C7CCD6', lineHeight: 1.7, margin: 0 }}>{review.summary}</p>
+        <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--signal)', margin: '0 0 8px' }}>ANALYST SUMMARY</p>
+        <p style={{ fontSize: 14, color: 'var(--paper)', lineHeight: 1.7, margin: 0 }}>{review.summary}</p>
       </div>
 
       {/* Recommendations */}
@@ -152,7 +152,7 @@ export default function MonthlyReviewer({ review }) {
                 }}
               >
                 <span style={{ color: 'var(--signal)', fontWeight: 700, fontSize: 14, marginTop: 2 }}>&#9654;</span>
-                <span style={{ fontSize: 13.5, color: '#C7CCD6', lineHeight: 1.55 }}>{r}</span>
+                <span style={{ fontSize: 13.5, color: 'var(--paper)', lineHeight: 1.55 }}>{r}</span>
               </div>
             ))}
           </div>
@@ -176,7 +176,7 @@ export default function MonthlyReviewer({ review }) {
                 }}
               >
                 <span style={{ color: 'var(--alert)', fontSize: 14 }}>&#9888;</span>
-                <span style={{ fontSize: 12.5, color: '#9CA1A6', lineHeight: 1.5 }}>{w}</span>
+                <span style={{ fontSize: 12.5, color: 'var(--paper-dim)', lineHeight: 1.5 }}>{w}</span>
               </div>
             ))}
           </div>

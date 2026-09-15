@@ -1,22 +1,22 @@
-function Bar({ label, value, max, sub }) {
+function Bar({ label, value, max, sub, rank }) {
   const pct = max > 0 ? Math.round((value / max) * 100) : 0;
   return (
-    <div style={{ marginBottom: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
-        <span>{label}</span>
-        <span style={{ color: 'var(--paper-dim)' }}>{sub}</span>
+    <div className="bt-row">
+      <div className="bt-row-head">
+        <span className="bt-row-label">
+          <span className="bt-rank-idx">{String(rank).padStart(2, '0')}</span>
+          {label}
+        </span>
+        <span className="bt-row-sub">{sub}</span>
       </div>
-      <div style={{ height: 6, background: 'var(--hairline)', borderRadius: 3 }}>
-        <div style={{
-          height: '100%', width: `${pct}%`,
-          background: 'var(--signal)', borderRadius: 3, opacity: 0.85,
-        }} />
+      <div className="bt-track">
+        <div className="bt-fill" style={{ width: `${Math.max(pct, 2)}%` }} />
       </div>
     </div>
   );
 }
 
-const SLOT_HOURS = { 0: '00–06', 6: '06–12', 12: '12–18', 18: '18–24' };
+const SLOT_HOURS = { 0: '00:00–06:00', 6: '06:00–12:00', 12: '12:00–18:00', 18: '18:00–24:00' };
 
 export default function BestTimes({ bestTimes }) {
   if (!bestTimes) return null;
@@ -26,14 +26,15 @@ export default function BestTimes({ bestTimes }) {
     <div>
       <p className="report-summary">{bestTimes.summary}</p>
       {bestTimes.enough_data && slots.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          {slots.map((s) => (
+        <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {slots.map((s, i) => (
             <Bar
               key={`${s.hour}-${s.day}`}
-              label={`${SLOT_HOURS[s.hour] || s.hour}:00 UTC`}
+              rank={i + 1}
+              label={`${SLOT_HOURS[s.hour] || `${String(s.hour).padStart(2, '0')}:00`} UTC`}
               value={s.avg_engagement}
               max={slots[0].avg_engagement}
-              sub={`${s.avg_engagement.toLocaleString()} avg · ${s.day} · ${s.samples} posts`}
+              sub={`${s.avg_engagement.toLocaleString()} avg · ${s.day} · ${s.samples} post${s.samples === 1 ? '' : 's'}`}
             />
           ))}
         </div>

@@ -11,6 +11,9 @@ export default defineConfig(({ mode }) => {
       react(),
       VitePWA({
         registerType: 'autoUpdate',
+        // Generate the service worker + manifest in dev too, so /manifest.webmanifest
+        // resolves instead of falling back to index.html (manifest parse errors).
+        devOptions: { enabled: true },
         includeAssets: ['favicon.svg', 'icons/*.png'],
         manifest: {
           name: 'InstaIQ — AI Instagram Intelligence Agent',

@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:pwa": "vite build",
     "preview": "vite preview --host --port 4173"
   },
   "dependencies": {

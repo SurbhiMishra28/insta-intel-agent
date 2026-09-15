@@ -58,6 +58,7 @@ from models import (
     ProfileInsight,
     ReelTiming,
     ScanRecord,
+    ScoreExplanation,
     TrendInfo,
     TrendAlert,
     TrendsResponse,
@@ -120,18 +121,39 @@ def data_source_info():
             ).fetchone()[0]
     except Exception:
         pass
-    live = scraper.DATA_MODE == "live" and bool(scraper.APIFY_TOKEN)
+    live = scraper.DATA_MODE == "live" and bool(scraper.APIFY_TOKENS)
+    pool = scraper.apify_token_pool_status()
+    healthy_tokens = sum(1 for t in pool if t["status"] == "ready" and not t["benched"])
+    if pool and healthy_tokens == 0:
+        live_note = (
+            "Every Apify token in the pool is benched (credit exhausted or "
+            "rejected). Fetches automatically fall back to the keyless direct "
+            "Instagram provider (real data, no token needed), so analysis keeps "
+            "working. Tokens are retried when their cooldown lapses — or add a "
+            "fresh free account's token as APIFY_TOKEN_2 in backend/.env "
+            "(every free Apify account gets $5/month)."
+        )
+    elif len(pool) > 1:
+        live_note = (
+            f"Real Instagram data is fetched live via the Apify API with "
+            f"{len(pool)}-token failover ({healthy_tokens} ready); fetches are "
+            "cached locally, so repeat analyses are instant and free. "
+            "All AI analysis runs on the NVIDIA NIM API."
+        )
+    else:
+        live_note = (
+            "Real Instagram data is fetched live via the Apify API and "
+            "cached locally, so repeat analyses are instant and free. "
+            "All AI analysis runs on the NVIDIA NIM API."
+        )
     return {
         "ok": True,
         "source": "live" if live else "cache",
         "data_mode": scraper.DATA_MODE,
         "ai_provider": "nvidia-nim" if ai_engine.LLM_API_KEY else "rule-based-fallback",
         "cached_profiles": cached_profiles,
-        "note": (
-            "Real Instagram data is fetched live via the Apify API and "
-            "cached locally, so repeat analyses are instant and free. "
-            "All AI analysis runs on the NVIDIA NIM API."
-        ) if live else (
+        "apify_tokens": pool,
+        "note": live_note if live else (
             "Real Instagram data is served from the local cache of past "
             "fetches; unknown handles get clearly-badged simulated data. "
             "All AI analysis runs on the NVIDIA NIM API."
@@ -453,6 +475,12 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
         hashtags = None  # research is additive; never block the plan
 
     # --- Trend history ---
+    score_explanation = None
+    try:
+        expl = analytics.explain_account_score(main_insight)
+        score_explanation = ScoreExplanation(**expl)
+    except Exception:
+        score_explanation = None  # additive; never block the plan
     storage.record_scan(main_insight)  # best-effort
     history_records, previous = storage.get_history(main_insight.profile.username)
 
@@ -461,6 +489,7 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
         plan=plan,
         rivals=rivals,
         warnings=[w for w in warnings if w],
+        score_explanation=score_explanation,
         best_times=best_times,
         cadence_map=cadence_map,
         reels=reels,
