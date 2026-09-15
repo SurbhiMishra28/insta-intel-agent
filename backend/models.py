@@ -204,7 +204,7 @@ class ReelTimingSlot(BaseModel):
     day: str                # Mon..Sun
     hour: int               # 0-23, suggested start hour
     rationale: str          # why this slot is a whitespace opportunity
-    competitor_activity: str  # low/medium/high — how busy rivals are at this slot
+    competitor_activity: str  # low/medium/high (from researched rivals) or unknown (no rivals analyzed)
 
 
 class ReelTiming(BaseModel):

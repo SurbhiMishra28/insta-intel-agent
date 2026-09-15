@@ -83,6 +83,7 @@ export default function App() {
   const [whitespace, setWhitespace] = useState(null);
   const [trendsData, setTrendsData] = useState(null);
   const [busy, setBusy] = useState({}); // { research: bool, review: bool, ... }
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   useEffect(() => {
     fetch(`${API_URL}/`)
@@ -138,6 +139,36 @@ export default function App() {
       setError(err.message);
     } finally {
       setBusy((b) => ({ ...b, [key]: false }));
+    }
+  };
+
+  const downloadPdf = async () => {
+    const handle = p?.username || previewHandle(username);
+    if (!handle || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/api/export/pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: handle }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `instaiq-${handle}-report.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'PDF export failed.');
+    } finally {
+      setPdfBusy(false);
     }
   };
 
@@ -232,6 +263,14 @@ export default function App() {
                 {p?.is_verified && <span className="badge">VERIFIED</span>}
                 {verdict && <span className={`pill ${verdict.cls}`}>{verdict.label} ER</span>}
                 {p?.data_age_hours === -1 && <span className="pill bad">SIMULATED</span>}
+                <button
+                  className="pdf-btn"
+                  onClick={downloadPdf}
+                  disabled={pdfBusy}
+                  title="Download the full analysis as a PDF report"
+                >
+                  {pdfBusy ? 'Building PDF…' : '⬇ Download PDF'}
+                </button>
               </div>
               <p className="dash-hero-bio">{p?.bio || p?.full_name || ''}</p>
               <div className="dash-stats">

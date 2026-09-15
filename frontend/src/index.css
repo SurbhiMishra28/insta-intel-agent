@@ -1344,3 +1344,25 @@ textarea:focus-visible {
   color: var(--paper-dim);
   font-style: italic;
 }
+
+/* ---------- PDF download button (hero card) ---------- */
+
+.pdf-btn {
+  margin-left: auto;
+  background: var(--panel-raised);
+  color: var(--signal);
+  border: 1px solid var(--signal-dim);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.pdf-btn:hover:not(:disabled) {
+  background: var(--signal);
+  color: var(--ink);
+}
+
+.pdf-btn:disabled { opacity: 0.55; cursor: wait; }

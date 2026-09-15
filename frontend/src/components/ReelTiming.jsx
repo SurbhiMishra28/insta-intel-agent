@@ -3,7 +3,8 @@ function SlotRow({ slot, rank }) {
     low: { c: 'var(--acc-green)', label: 'low competition' },
     medium: { c: 'var(--acc-violet)', label: 'medium competition' },
     high: { c: 'var(--acc-rose)', label: 'high competition' },
-  }[slot.competitor_activity] || { c: 'var(--paper-dim)', label: 'competition' };
+    unknown: { c: 'var(--paper-dim)', label: 'competition unknown' },
+  }[slot.competitor_activity] || { c: 'var(--paper-dim)', label: 'competition unknown' };
 
   return (
     <div className="rt-row">

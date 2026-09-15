@@ -380,26 +380,17 @@ def compute_reel_timing(insight: ProfileInsight, rivals: Optional[List[ProfileIn
     reels = [p for p in posts if p.media_type in ("reel", "video") and p.posted_at]
 
     if not reels:
-        # No reel data — suggest general high-traffic windows as whitespace
+        # No reel data — say so honestly instead of inventing "high-traffic"
+        # windows we have no evidence for. Empty slots = the UI shows its
+        # insufficient-data state.
         return ReelTiming(
-            slots=[
-                ReelTimingSlot(
-                    day="Wed", hour=18,
-                    rationale="No reel data yet — Wed 18:00-21:00 UTC is a high-traffic window most accounts can capture.",
-                    competitor_activity="medium",
-                ),
-                ReelTimingSlot(
-                    day="Fri", hour=12,
-                    rationale="No reel data yet — Fri lunch hours (12:00-15:00 UTC) show strong casual-scroll engagement.",
-                    competitor_activity="medium",
-                ),
-                ReelTimingSlot(
-                    day="Sun", hour=19,
-                    rationale="No reel data yet — Sunday evening is a high-engagement window as users prepare for the week.",
-                    competitor_activity="low",
-                ),
-            ],
-            summary="No reels with timestamps found — start posting reels and this analysis will find your account's best whitespace windows.",
+            slots=[],
+            summary=(
+                f"No reels with timestamps found in @{insight.profile.username}'s recent "
+                "posts, so there is no real data to find timing whitespace from yet. "
+                "Post a few reels and re-scan — this analysis is computed from actual "
+                "posting times and engagement, never estimated."
+            ),
             enough_data=False,
             current_reel_cadence="0 reels in sample",
         )
@@ -469,8 +460,10 @@ def compute_reel_timing(insight: ProfileInsight, rivals: Optional[List[ProfileIn
             key = (day_idx, sh)
             if key in used_slots:
                 continue  # already posting here
-            activity = comp_slot_activity.get(key, "medium")
-            # Prefer low-competition slots, then medium
+            activity = comp_slot_activity.get(key, "unknown" if not rivals else "medium")
+            # Without researched rivals we cannot claim anything about
+            # competition — the slot is ranked purely by the account's own
+            # unused windows, and the UI labels it "competition unknown".
             if activity == "high":
                 continue
             day_name = day_names[day_idx]
@@ -480,10 +473,15 @@ def compute_reel_timing(insight: ProfileInsight, rivals: Optional[List[ProfileIn
                     f"{day_name} {hour_range}: no reels posted here by @{insight.profile.username} "
                     f"and low competitor activity — a clear whitespace to capture undivided attention."
                 )
-            else:
+            elif activity == "medium":
                 rationale = (
                     f"{day_name} {hour_range}: not used by @{insight.profile.username} yet; "
                     f"moderate competitor presence means room to stand out with strong hooks."
+                )
+            else:
+                rationale = (
+                    f"{day_name} {hour_range}: not used by @{insight.profile.username} in the "
+                    f"recent sample — a window their audience is not being served at yet."
                 )
             whitespace_slots.append(ReelTimingSlot(
                 day=day_name,
@@ -492,16 +490,19 @@ def compute_reel_timing(insight: ProfileInsight, rivals: Optional[List[ProfileIn
                 competitor_activity=activity,
             ))
 
-    # Sort: low-activity first, then by day order
-    activity_rank = {"low": 0, "medium": 1}
+    # Sort: known low-activity first, then unknown, then day order
+    activity_rank = {"low": 0, "medium": 1, "unknown": 2}
     whitespace_slots.sort(key=lambda s: (activity_rank.get(s.competitor_activity, 2), day_names.index(s.day), s.hour))
 
     top_slots = whitespace_slots[:6]
 
     summary = (
         f"@{insight.profile.username} posts {cadence_str} reels. "
-        f"Found {len(whitespace_slots)} unused day/hour windows where competitors are quiet. "
-        f"Top picks below — test 2-3 of these slots for 2 weeks and measure the like/comment lift."
+        f"Found {len(whitespace_slots)} unused day/hour windows"
+        + (" where researched competitors are quiet." if rivals else ". "
+           "Competition levels are unknown (no rivals analyzed) — ranking is by "
+           "the account's own unused windows.")
+        + " Top picks below — test 2-3 of these slots for 2 weeks and measure the like/comment lift."
     )
     if not top_slots:
         summary = (

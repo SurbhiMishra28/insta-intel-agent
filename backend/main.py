@@ -1,7 +1,8 @@
 import os
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
+from types import SimpleNamespace
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -307,6 +308,9 @@ async def competitor_research(req: AnalyzeRequest, count: int = Query(5, ge=1, l
     main_insight, competitor_insights, extra_warnings, candidates_found, rationale = await _research_competitors(
         req.username, main_profile, count
     )
+    storage.record_scan(main_insight)  # best-effort trend tracking
+    for _ci in competitor_insights:
+        storage.record_scan(_ci)
     warnings = [w for w in [_data_quality_warning(main_insight)] + extra_warnings if w]
 
     if not competitor_insights:
@@ -371,16 +375,12 @@ async def discover(req: AnalyzeRequest, limit: int = Query(10, ge=1, le=30)):
     ]
 
 
-@app.post("/api/growth-plan", response_model=GrowthPlanResponse)
-async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
-    """Content suggestions + follower-growth plan for an account.
-
-    Fetches the account's real data, optionally researches `count`
-    auto-discovered competitors to ground the advice in what works in the
-    niche (count=0 skips that), then builds the plan: content pillars,
-    ready-to-make post ideas, weekly schedule, hashtag sets, engagement
-    tactics and honest follower-growth targets.
-    """
+async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse:
+    """Shared full-dashboard pipeline: fetch → analyze → research rivals →
+    build every section. /api/growth-plan and /api/export/pdf BOTH run this,
+    so the downloadable PDF always contains exactly the analysis the UI
+    shows — one source of truth, no duplicated logic."""
+    req = SimpleNamespace(username=username)  # shape-compatible with AnalyzeRequest
     try:
         main_profile = await scraper.get_profile(req.username)
     except ValueError as e:
@@ -499,6 +499,260 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
         reel_timing=reel_timing,
         trends_result=trend_response,
         history=history_records,
+    )
+
+
+@app.post("/api/growth-plan", response_model=GrowthPlanResponse)
+async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
+    """Content suggestions + follower-growth plan for an account.
+
+    Fetches the account's real data, optionally researches `count`
+    auto-discovered competitors to ground the advice in what works in the
+    niche (count=0 skips that), then builds the plan: content pillars,
+    ready-to-make post ideas, weekly schedule, hashtag sets, engagement
+    tactics and honest follower-growth targets.
+    """
+    return await _build_full_dashboard(req.username, count)
+
+
+# ---------------------------------------------------------------------------
+# PDF export — the full dashboard as a downloadable report
+# ---------------------------------------------------------------------------
+
+def _chrome_print_pdf(html: str) -> bytes:
+    """Render an HTML report to PDF with headless Chrome (already a hard
+    dependency of the keyless data path). Returns raw PDF bytes; raises
+    RuntimeError when no browser is available or printing fails."""
+    import tempfile
+    import os as _os
+
+    chrome = scraper._find_chrome()
+    if not chrome:
+        raise RuntimeError(
+            "PDF export needs Chrome or Edge installed (used headless for "
+            "rendering). Could not find a browser on this machine."
+        )
+    import subprocess
+    with tempfile.TemporaryDirectory() as td:
+        src = _os.path.join(td, "report.html")
+        out = _os.path.join(td, "report.pdf")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(html)
+        cmd = [
+            chrome, "--headless=new", "--disable-gpu", "--no-first-run",
+            "--no-pdf-header-footer", f"--print-to-pdf={out}",
+            "file:///" + src.replace("\\", "/"),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=90)
+        if not _os.path.isfile(out) or _os.path.getsize(out) == 0:
+            raise RuntimeError(f"PDF rendering failed ({proc.returncode}).")
+        with open(out, "rb") as f:
+            return f.read()
+
+
+def _esc(v) -> str:
+    import html as _html
+    return _html.escape(str(v)) if v is not None else ""
+
+
+def _render_report_html(d: GrowthPlanResponse) -> str:
+    """Build the printable HTML report from the same response object the UI
+    consumes. Light theme (print-friendly); every number comes straight from
+    the real-data pipeline."""
+    p, m = d.main.profile, d.main.metrics
+    parts: list = []
+
+    parts.append(f"""<!doctype html><html><head><meta charset="utf-8">
+<style>
+@page {{ size: A4; margin: 14mm 12mm; }}
+* {{ box-sizing: border-box; }}
+body {{ font-family: 'Segoe UI', Calibri, Arial, sans-serif; color: #1a1f24;
+        font-size: 10.5pt; line-height: 1.55; margin: 0; }}
+h1 {{ font-size: 20pt; margin: 0 0 4px; }}
+h2 {{ font-size: 13pt; color: #141a2e; border-bottom: 2px solid #16a34a;
+     padding-bottom: 4px; margin: 26px 0 10px; page-break-after: avoid; }}
+h3 {{ font-size: 11pt; margin: 14px 0 6px; }}
+.cover {{ border-bottom: 3px solid #16a34a; padding-bottom: 14px; margin-bottom: 6px; }}
+.cover .tag {{ color: #4b5563; font-size: 10pt; margin: 0 0 10px; }}
+.stats {{ display: flex; flex-wrap: wrap; gap: 10px 26px; margin: 10px 0 2px; }}
+.stat b {{ display: block; font-size: 15pt; }}
+.stat span {{ color: #4b5563; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }}
+.pill {{ display: inline-block; background: #16a34a; color: #fff; border-radius: 999px;
+        padding: 2px 10px; font-size: 8.5pt; font-weight: 700; margin-left: 8px; }}
+.pill.warn {{ background: #d97706; }}
+table {{ border-collapse: collapse; width: 100%; margin: 6px 0; }}
+th, td {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid #e5e7eb;
+         font-size: 9.5pt; vertical-align: top; }}
+th {{ color: #4b5563; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }}
+li {{ margin: 3px 0; }}
+.muted {{ color: #4b5563; }}
+.note {{ background: #fef3c7; border-left: 3px solid #d97706; padding: 8px 12px;
+         font-size: 9.5pt; margin: 8px 0; }}
+footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px solid #e5e7eb; padding-top: 8px; }}
+</style></head><body>""")
+
+    score = d.main.account_score
+    parts.append(f"""
+<div class="cover">
+  <h1>@{_esc(p.username)}{_esc(' · ' + p.full_name) if p.full_name else ''}
+      <span class="pill">Score {score}/100</span>
+      {'' if not p.is_verified else '<span class="pill">VERIFIED</span>'}
+  </h1>
+  <p class="tag">InstaIQ · AI Instagram Growth Report · generated {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
+  <p class="muted">{_esc(p.bio or '')}</p>
+  <div class="stats">
+    <div class="stat"><b>{p.followers:,}</b><span>Followers</span></div>
+    <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
+    <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
+    <div class="stat"><b>{m.avg_likes:,.0f}</b><span>Avg likes / post</span></div>
+    <div class="stat"><b>{m.avg_comments:,.0f}</b><span>Avg comments / post</span></div>
+    <div class="stat"><b>{m.posting_frequency_per_week}</b><span>Posts / week</span></div>
+    <div class="stat"><b style="text-transform:capitalize">{_esc(m.best_content_type)}</b><span>Top format</span></div>
+  </div>
+</div>""")
+
+    if d.warnings:
+        for w in d.warnings:
+            parts.append(f'<div class="note">⚠ {_esc(w)}</div>')
+
+    # --- AI report ---
+    parts.append('<h2>AI analyst readout</h2>')
+    if d.main.ai_summary:
+        parts.append(f'<p>{_esc(d.main.ai_summary)}</p>')
+    parts.append('<table><tr><th>Strengths</th><th>Weaknesses</th></tr><tr><td><ul>')
+    parts.extend(f'<li>{_esc(s)}</li>' for s in (d.main.strengths or []))
+    parts.append('</ul></td><td><ul>')
+    parts.extend(f'<li>{_esc(s)}</li>' for s in (d.main.weaknesses or []))
+    parts.append('</ul></td></tr></table>')
+    if d.main.recommendations:
+        parts.append('<h3>Recommendations</h3><ul>')
+        parts.extend(f'<li>{_esc(s)}</li>' for s in d.main.recommendations)
+        parts.append('</ul>')
+
+    # --- Growth plan ---
+    plan = d.plan
+    parts.append('<h2>Growth plan</h2>')
+    if getattr(plan, 'summary', ''):
+        parts.append(f'<p>{_esc(plan.summary)}</p>')
+    if plan.content_pillars:
+        parts.append('<h3>Content pillars</h3><ul>')
+        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.content_pillars)
+        parts.append('</ul>')
+    if plan.post_ideas:
+        parts.append('<h3>Ready-to-make post ideas</h3><table><tr><th>Idea</th><th>Format</th><th>Why it works</th></tr>')
+        for idea in plan.post_ideas:
+            parts.append(f'<tr><td><b>{_esc(idea.title)}</b><br><span class="muted">{_esc(idea.caption_concept)}</span></td>'
+                         f'<td>{_esc(idea.format)}</td><td>{_esc(idea.why)}</td></tr>')
+        parts.append('</table>')
+    if plan.weekly_schedule:
+        parts.append('<h3>Weekly schedule</h3><ul>')
+        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.weekly_schedule)
+        parts.append('</ul>')
+    if plan.hashtag_sets:
+        parts.append('<h3>Rotating hashtag sets</h3>')
+        for i, st in enumerate(plan.hashtag_sets, 1):
+            parts.append(f'<p><b>Set {i}:</b> {_esc(" ".join(st))}</p>')
+    if plan.engagement_tactics:
+        parts.append('<h3>Daily engagement tactics</h3><ul>')
+        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.engagement_tactics)
+        parts.append('</ul>')
+    if plan.follower_growth_targets:
+        parts.append('<h3>Follower growth — honest targets</h3><ul>')
+        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.follower_growth_targets)
+        parts.append('</ul>')
+    if plan.quick_wins:
+        parts.append('<h3>Do these today</h3><ol>')
+        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.quick_wins)
+        parts.append('</ol>')
+
+    # --- Timing ---
+    parts.append('<h2>Timing intelligence</h2>')
+    if d.best_times and d.best_times.enough_data and d.best_times.slots:
+        parts.append('<h3>Best time slots (UTC)</h3><table><tr><th>Window</th><th>Day</th><th>Avg engagement</th><th>Posts</th></tr>')
+        for s in d.best_times.slots:
+            parts.append(f'<tr><td>{s.hour:02d}:00–{(s.hour + 6) % 24:02d}:00</td><td>{_esc(s.day)}</td>'
+                         f'<td>{s.avg_engagement:,.0f}</td><td>{s.samples}</td></tr>')
+        parts.append('</table>')
+    if d.cadence_map and d.cadence_map.enough_data and d.cadence_map.heatmap:
+        cells = sorted(d.cadence_map.heatmap, key=lambda c: (-c.engagement))[:6]
+        parts.append('<h3>Strongest windows (weekday × 3h, UTC)</h3><table><tr><th>Window</th><th>Avg engagement</th><th>Posts</th></tr>')
+        for c in cells:
+            parts.append(f'<tr><td>{_esc(c.day)} {c.hour:02d}:00–{c.hour + 3:02d}:00</td>'
+                         f'<td>{c.engagement:,.0f}</td><td>{c.samples}</td></tr>')
+        parts.append('</table>')
+    if d.reel_timing and d.reel_timing.slots:
+        parts.append('<h3>Reel whitespace slots</h3><table><tr><th>Window (UTC)</th><th>Competition</th><th>Why</th></tr>')
+        for s in d.reel_timing.slots[:6]:
+            parts.append(f'<tr><td>{_esc(s.day)} {s.hour:02d}:00–{s.hour + 3:02d}:00</td><td>{_esc(s.competitor_activity)}</td>'
+                         f'<td>{_esc(s.rationale)}</td></tr>')
+        parts.append('</table>')
+
+    # --- Toolkit ---
+    if d.bio and getattr(d.bio, 'suggested_bio', ''):
+        parts.append('<h2>Bio optimizer</h2>')
+        parts.append(f'<p><b>Current:</b> {_esc(d.bio.current_bio) or "<i>(empty)</i>"}</p>')
+        parts.append(f'<p><b>Suggested:</b> {_esc(d.bio.suggested_bio)}</p>')
+        for n in (d.bio.notes or []):
+            parts.append(f'<p class="muted">{_esc(n)}</p>')
+    if d.hashtags:
+        parts.append('<h2>Hashtag research</h2>')
+        parts.append(f'<p>{_esc(d.hashtags.summary)}</p>')
+        for i, st in enumerate(d.hashtags.recommended_sets or [], 1):
+            parts.append(f'<p><b>Set {i}:</b> {_esc(" ".join(st))}</p>')
+    if d.hashtag_suggestions:
+        caps = getattr(d.hashtag_suggestions, 'suggestions', None) or []
+        if caps:
+            parts.append('<h2>Ready-to-paste captions</h2><ul>')
+            for c in caps[:5]:
+                text = getattr(c, 'caption', c)
+                parts.append(f'<li>{_esc(text)}</li>')
+            parts.append('</ul>')
+
+    # --- Trends ---
+    if d.trends_result:
+        alerts = getattr(d.trends_result, 'alerts', None) or []
+        if alerts:
+            parts.append('<h2>Trend plays</h2><ul>')
+            for a in alerts[:5]:
+                parts.append(f'<li><b>{_esc(getattr(a, "title", ""))}</b> — {_esc(getattr(a, "why", getattr(a, "description", "")))}</li>')
+            parts.append('</ul>')
+
+    # --- Scan history ---
+    if d.history:
+        parts.append('<h2>Scan history</h2><table><tr><th>Date (UTC)</th><th>Followers</th><th>ER %</th><th>Avg likes</th><th>Posts/wk</th></tr>')
+        for h in d.history[-8:]:
+            parts.append(f'<tr><td>{_esc(str(h.scanned_at)[:16]).replace("T", " ")}</td><td>{h.followers:,}</td>'
+                         f'<td>{h.engagement_rate}</td><td>{h.avg_likes:,.0f}</td><td>{h.posting_frequency_per_week}</td></tr>')
+        parts.append('</table>')
+
+    parts.append(f'<footer>Generated by InstaIQ · all metrics computed from real Instagram data fetched for @{_esc(p.username)} · score explained by size-aware channels (engagement {m.engagement_rate}%, cadence {m.posting_frequency_per_week}/week)</footer>')
+    parts.append('</body></html>')
+    return "\n".join(parts)
+
+
+@app.post("/api/export/pdf")
+async def export_pdf(req: AnalyzeRequest, count: int = Query(0, ge=0, le=10)):
+    """Download the full analysis (the same dashboard the UI renders) as a
+    PDF report. count>0 also researches rivals exactly like /api/growth-plan.
+    """
+    from fastapi import Response
+    from fastapi.responses import JSONResponse
+    try:
+        dash = await _build_full_dashboard(req.username, count)
+        pdf = await asyncio.get_event_loop().run_in_executor(
+            _LLM_POOL, _chrome_print_pdf, _render_report_html(dash)
+        )
+    except HTTPException:
+        raise  # 400/503 from the data layer pass through untouched
+    except RuntimeError as e:
+        return JSONResponse(status_code=503, content={"detail": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"detail": f"PDF export failed: {e}"})
+    filename = f"instaiq-{dash.main.profile.username}-report.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -656,6 +910,7 @@ async def whitespace(req: AnalyzeRequest, rivals: int = Query(0, ge=0, le=6)):
         raise HTTPException(status_code=502, detail=f"Could not fetch profile: {e}")
 
     insight = await _analyze_one(profile)
+    storage.record_scan(insight)  # best-effort trend tracking
     warnings = [w for w in [_data_quality_warning(insight)] if w]
 
     rival_insights: list = []
