@@ -9,23 +9,29 @@ function fmt(n) {
 /* Per-post engagement breakdown for the recent sample — makes the averages
    transparent: avg likes/comments are literally the sum of these rows
    divided by the count. Every number comes straight from Instagram. */
-export function PostBreakdown({ profile }) {
+export function PostBreakdown({ profile, metrics }) {
   const posts = (profile?.recent_posts || []).filter(
     (p) => p && (p.likes > 0 || p.comments > 0 || p.id),
   );
   if (posts.length === 0) return null;
   const totalLikes = posts.reduce((s, p) => s + (p.likes || 0), 0);
   const totalComments = posts.reduce((s, p) => s + (p.comments || 0), 0);
+  const postsOnly = posts.filter((p) => p.media_type === 'image' || p.media_type === 'carousel');
+  const reelsOnly = posts.filter((p) => p.media_type === 'reel' || p.media_type === 'video');
+  const avgOf = (items, key) =>
+    items.length ? (items.reduce((s, p) => s + (p[key] || 0), 0) / items.length) : 0;
+  const bfmt = metrics?.comments_by_format || null;
   return (
     <div className="post-breakdown" style={{ marginTop: 14 }}>
       <p className="section-label" style={{ marginBottom: 6 }}>
-        Last {posts.length} posts — the data behind the averages
+        Last {posts.length} posts &amp; reels — the data behind the averages
       </p>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
           <thead>
             <tr style={{ textAlign: 'left', color: 'var(--paper-dim)', fontSize: 11 }}>
               <th style={{ padding: '4px 8px' }}>#</th>
+              <th style={{ padding: '4px 8px' }}>Type</th>
               <th style={{ padding: '4px 8px' }}>Likes</th>
               <th style={{ padding: '4px 8px' }}>Comments</th>
               <th style={{ padding: '4px 8px' }}>Posted</th>
@@ -36,13 +42,14 @@ export function PostBreakdown({ profile }) {
             {posts.map((p, i) => (
               <tr key={p.id || i} style={{ borderTop: '1px solid var(--hairline)' }}>
                 <td style={{ padding: '4px 8px', color: 'var(--paper-dim)' }}>{i + 1}</td>
+                <td style={{ padding: '4px 8px', textTransform: 'capitalize' }}>{p.media_type || 'post'}</td>
                 <td style={{ padding: '4px 8px' }}>{(p.likes || 0).toLocaleString()}</td>
                 <td style={{ padding: '4px 8px' }}>{(p.comments || 0).toLocaleString()}</td>
                 <td style={{ padding: '4px 8px', color: 'var(--paper-dim)' }}>
                   {p.posted_days_ago != null ? `${p.posted_days_ago}d ago` : '—'}
                 </td>
-                <td style={{ padding: '4px 8px', color: 'var(--paper-dim)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {(p.caption || '').slice(0, 80) || '(no caption)'}
+                <td style={{ padding: '4px 8px', color: 'var(--paper-dim)', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {(p.caption || '').slice(0, 70) || '(no caption)'}
                 </td>
               </tr>
             ))}
@@ -52,9 +59,22 @@ export function PostBreakdown({ profile }) {
       <p style={{ fontSize: 12, color: 'var(--paper-dim)', margin: '6px 0 0' }}>
         Avg likes = {totalLikes.toLocaleString()} ÷ {posts.length} ={' '}
         <b>{(totalLikes / posts.length).toLocaleString(undefined, { maximumFractionDigits: 1 })}</b>
-        {' · '}Avg comments = {totalComments.toLocaleString()} ÷ {posts.length} ={' '}
+        {' · '}Avg comments (posts + reels) = {totalComments.toLocaleString()} ÷ {posts.length} ={' '}
         <b>{(totalComments / posts.length).toLocaleString(undefined, { maximumFractionDigits: 1 })}</b>
       </p>
+      {bfmt && (bfmt.posts?.count > 0 || bfmt.reels?.count > 0) && (
+        <p style={{ fontSize: 12, color: 'var(--paper-dim)', margin: '3px 0 0' }}>
+          {bfmt.posts?.count > 0 && (
+            <>Posts ({bfmt.posts.count}): {bfmt.posts.total_comments.toLocaleString()} comments, avg{' '}
+              <b>{bfmt.posts.avg_comments.toLocaleString(undefined, { maximumFractionDigits: 1 })}</b></>
+          )}
+          {bfmt.posts?.count > 0 && bfmt.reels?.count > 0 && ' · '}
+          {bfmt.reels?.count > 0 && (
+            <>Reels ({bfmt.reels.count}): {bfmt.reels.total_comments.toLocaleString()} comments, avg{' '}
+              <b>{bfmt.reels.avg_comments.toLocaleString(undefined, { maximumFractionDigits: 1 })}</b></>
+          )}
+        </p>
+      )}
     </div>
   );
 }
@@ -223,5 +243,5 @@ export default function ProfileReadout({ insight, compact = false }) {
    use where the full per-post transparency is wanted (dashboard hero). */
 export function AvgCommentBreakdown({ insight }) {
   if (!insight?.profile) return null;
-  return <PostBreakdown profile={insight.profile} />;
+  return <PostBreakdown profile={insight.profile} metrics={insight.metrics} />;
 }

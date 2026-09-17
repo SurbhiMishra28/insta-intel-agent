@@ -37,6 +37,13 @@ class ProfileData(BaseModel):
     data_age_hours: Optional[float] = None  # set when serving stale cached data = []
 
 
+class CommentBlock(BaseModel):
+    """Comment totals for one content format from the real recent sample."""
+    count: int = 0                    # how many items of this format were sampled
+    total_comments: int = 0
+    avg_comments: float = 0.0
+
+
 class ProfileMetrics(BaseModel):
     engagement_rate: float
     avg_likes: float
@@ -48,6 +55,7 @@ class ProfileMetrics(BaseModel):
     avg_views: float = 0        # avg video/reel views (0 when none in sample)
     reels_count: int = 0        # reels/videos with real view data in the sample
     comments_unresolved_in_sample: int = 0  # posts whose comment count the feed omitted and backfill didn't resolve
+    comments_by_format: Optional[dict] = None  # {combined,posts,reels} -> {count,total_comments,avg_comments}
 
 
 class ProfileInsight(BaseModel):
@@ -368,6 +376,7 @@ class ScoreExplanation(BaseModel):
 
 
 # Resolve forward references (BestTimes etc. are defined from here on).
+ProfileMetrics.model_rebuild()
 GrowthPlanResponse.model_rebuild()
 MonthlyReviewResponse.model_rebuild()
 TrendsResponse.model_rebuild()

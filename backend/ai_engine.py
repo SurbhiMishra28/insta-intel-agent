@@ -177,6 +177,24 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
         1 for p in posts if getattr(p, "comment_count_omitted", False)
     )
 
+    # Per-format comment math over the same real sample: the combined
+    # average IS the average of all posts + reels together; the per-format
+    # numbers show where the comments actually come from.
+    posts_only = [p for p in posts if p.media_type in ("image", "carousel")]
+    reels_only = [p for p in posts if p.media_type in ("reel", "video")]
+
+    def _comment_block(items):
+        total = sum(p.comments for p in items)
+        return {
+            "count": len(items),
+            "total_comments": total,
+            "avg_comments": round(total / len(items), 2) if items else 0.0,
+        }
+
+    combined = _comment_block(posts)
+    posts_block = _comment_block(posts_only)
+    reels_block = _comment_block(reels_only)
+
     return ProfileMetrics(
         engagement_rate=engagement_rate,
         avg_likes=round(avg_likes, 1),
@@ -188,6 +206,11 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
         avg_views=round(avg_views, 1),
         reels_count=reels_count,
         comments_unresolved_in_sample=unresolved_comments,
+        comments_by_format={
+            "combined": combined,
+            "posts": posts_block,
+            "reels": reels_block,
+        },
     )
 
 

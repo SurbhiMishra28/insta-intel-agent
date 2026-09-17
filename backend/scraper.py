@@ -1521,10 +1521,12 @@ async def _enrich_with_permalink_posts(
     profile unchanged when nothing can be parsed before the deadline."""
     if profile is None or profile.recent_posts:
         return profile
-    links = _extract_permalinks(dom, 12)
+    links = _extract_permalinks(dom, 20)  # both /p/ and /reel/ links, newest first
     if not links:
         return profile
-    max_posts = int(os.getenv("IG_PERMALINK_POSTS", "6"))  # headless renders are slow
+    # 12 items (posts AND reels) gives the comment average a real sample
+    # across formats instead of 6 same-format items.
+    max_posts = int(os.getenv("IG_PERMALINK_POSTS", "12"))
     targets = links[:max_posts]
 
     async def _render_one(seq: int, code: str, kind: str) -> Optional[Post]:
@@ -1591,7 +1593,7 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
         return profile  # no browser available; keep stats as-is
 
     deadline = time.monotonic() + budget
-    max_posts = int(os.getenv("IG_PERMALINK_POSTS", "6"))
+    max_posts = int(os.getenv("IG_PERMALINK_POSTS", "12"))  # posts + reels sample
 
     suspects = [
         post for post in profile.recent_posts
