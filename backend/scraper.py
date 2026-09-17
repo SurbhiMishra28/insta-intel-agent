@@ -277,15 +277,30 @@ def _disk_profile_get_any(username: str) -> Optional[ProfileData]:
     return p
 
 
-def _disk_profile_set(username: str, p: ProfileData) -> None:
-    _cache_set(f"profile:{username}", _profile_to_json(p))
-    # Mirror every fetched handle into the browsable profile data store
-    # (datastore.py / profile_datastore.db) — best-effort, never breaks a fetch.
+def purge_account(username: str) -> dict:
+    """Cut one handle out of the agent entirely: drop its disk-cached profile
+    snapshot, its related-profiles discovery caches and its in-memory entry.
+    (Scan-history rows are cleared separately by storage.clear_history.)
+    Returns how many cache keys/entries were removed."""
+    uname = normalize_username(username)
+    removed = {"profile_snapshot": 0, "discovery_caches": 0, "memory": 0}
     try:
-        import datastore
-        datastore.upsert_profile(p)
+        with _cache_conn() as conn:
+            cur = conn.execute("DELETE FROM cache WHERE key = ?", (f"profile:{uname}",))
+            removed["profile_snapshot"] = cur.rowcount or 0
+            cur = conn.execute(
+                "DELETE FROM cache WHERE key LIKE ?", (f"related:{uname}:%",)
+            )
+            removed["discovery_caches"] = cur.rowcount or 0
     except Exception:
         pass
+    if _profile_cache.pop(uname, None) is not None:
+        removed["memory"] = 1
+    return removed
+
+
+def _disk_profile_set(username: str, p: ProfileData) -> None:
+    _cache_set(f"profile:{username}", _profile_to_json(p))
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1016,110 @@ def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# In-page GraphQL via Chrome DevTools protocol
+#
+# Instagram 401s every HTTP-level GraphQL call from this environment (the
+# request lacks a real browser TLS/header fingerprint). The robust way to
+# use GraphQL for real data: launch headless Chrome with a persistent
+# --remote-debugging-port, open instagram.com, and run fetch() FROM INSIDE
+# the page — same origin, same cookies, same fingerprint as the site's own
+# frontend. That is precisely how instagram.com consumes its GraphQL API,
+# so the request looks fully legitimate.
+# ---------------------------------------------------------------------------
+
+_CDP_PORT = int(os.getenv("IG_CDP_PORT", "9333"))
+
+
+def _cdp_ws_url() -> Optional[str]:
+    """DevTools websocket URL of a live Chrome debuggee (launches one on a
+    fixed port when absent). Sync — call via asyncio.to_thread."""
+    import urllib.request as _uq
+
+    def _targets():
+        with _uq.urlopen(f"http://127.0.0.1:{_CDP_PORT}/json", timeout=3) as r:
+            return json.loads(r.read().decode("utf-8"))
+
+    try:
+        for t in _targets():
+            if t.get("type") == "page" and "instagram.com" in str(t.get("url", "")):
+                return t.get("webSocketDebuggerUrl")
+        # Port not serving (or no IG tab) — (re)launch headless Chrome.
+        chrome = _find_chrome()
+        if not chrome:
+            return None
+        import subprocess
+        import tempfile
+        os.makedirs(os.path.join(tempfile.gettempdir(), "instaiq-chrome"), exist_ok=True)
+        subprocess.Popen(
+            [
+                chrome,
+                f"--remote-debugging-port={_CDP_PORT}",
+                f"--user-data-dir={os.path.join(tempfile.gettempdir(), 'instaiq-chrome')}",
+                "--headless=new", "--disable-gpu", "--no-first-run",
+                "--no-default-browser-check", "--window-size=1280,2400",
+                f"--user-agent={_DIRECT_HEADERS['user-agent']}",
+                "https://www.instagram.com/",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        for _ in range(30):  # wait for the DevTools endpoint + IG tab
+            time.sleep(1)
+            try:
+                for t in _targets():
+                    if t.get("type") == "page" and "instagram.com" in str(t.get("url", "")):
+                        return t.get("webSocketDebuggerUrl")
+            except Exception:
+                pass
+        return None
+    except Exception:
+        return None
+
+
+async def _cdp_page_eval(js: str, url: str, settle_ms: int = 4000) -> Optional[str]:
+    """Open `url` in the debuggee Chrome tab, wait `settle_ms`, evaluate `js`
+    in the page and return the JSON-encoded result. Uses Chrome DevTools
+    protocol over websocket (websockets lib ships with uvicorn).
+    Returns None on any failure — callers degrade to other providers."""
+    try:
+        import websockets
+    except Exception:
+        return None
+    ws_url = await asyncio.to_thread(_cdp_ws_url)
+    if not ws_url:
+        return None
+
+    async def _rpc(ws, mid, method, params=None):
+        await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg.get("id") == mid:
+                return msg
+
+    try:
+        async with websockets.connect(ws_url, max_size=64 * 1024 * 1024) as ws:
+            await _rpc(ws, 1, "Runtime.enable")
+            nav = await _rpc(ws, 2, "Page.navigate", {"url": url})
+            if nav.get("result", {}).get("errorText"):
+                return None
+            await asyncio.sleep(max(0.5, settle_ms / 1000))
+            ev = await _rpc(ws, 3, "Runtime.evaluate", {
+                "expression": js,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "timeout": 25000,
+            })
+            result = (ev.get("result") or {}).get("result") or {}
+            if result.get("subtype") == "error" or result.get("type") == "object" and result.get("className", "").endswith("Error"):
+                return None
+            value = result.get("value")
+            if value is None:
+                return None
+            return value if isinstance(value, str) else json.dumps(value)
+    except Exception:
+        return None
+
+
 def _extract_profile_from_html(html: str, requested: str) -> Optional[ProfileData]:
     """Last-resort parse of a plain instagram.com/<handle>/ HTML page.
 
@@ -1403,6 +1522,67 @@ def _extract_profile_from_dom(html: str, requested: str) -> Optional[ProfileData
     the DOM carry no engagement numbers, so no synthetic Post rows are
     fabricated — only real profile stats are returned."""
     return _extract_profile_from_html(html, requested)
+
+
+async def _fetch_graphql_profile(username: str) -> Optional[ProfileData]:
+    """GraphQL provider: run Instagram's own persisted profile query
+    (doc_id 10015901848480474) from INSIDE a real Chrome page via the
+    DevTools protocol. Same-origin fetch with the page's cookies — the
+    exact request the site's frontend makes — so Instagram serves real
+    GraphQL data instead of 401ing the HTTP-level call.
+
+    Returns None (caller falls through to other providers) when Chrome/
+    websockets are unavailable or the query doesn't return a user."""
+    if os.getenv("IG_GQL_BROWSER", "true").lower() not in ("1", "true", "yes"):
+        return None
+    js = """
+(async () => {
+  try {
+    const lsd = (document.documentElement.innerHTML.split('"LSD",[],{"token":"')[1] || '').split('"')[0];
+    const vars = JSON.stringify({username: %s});
+    const body = new URLSearchParams({variables: vars, doc_id: %s, lsd: lsd});
+    const r = await fetch('/graphql/query', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {'content-type': 'application/x-www-form-urlencoded',
+                'x-ig-app-id': '%s',
+                'x-fb-lsd': lsd,
+                'x-requested-with': 'XMLHttpRequest'},
+      body: body.toString(),
+    });
+    return JSON.stringify({status: r.status, body: await r.text()});
+  } catch (e) {
+    return JSON.stringify({status: 0, error: String(e)});
+  }
+})()
+""" % (
+        json.dumps(username),
+        json.dumps("10015901848480474"),
+        IG_WEB_APP_ID,
+    )
+    raw = await _cdp_page_eval(
+        js,
+        f"https://www.instagram.com/{username}/",
+        settle_ms=3500,
+    )
+    if not raw:
+        return None
+    try:
+        outer = json.loads(raw)
+        status = int(outer.get("status") or 0)
+        body = outer.get("body") or ""
+        if status != 200 or not body:
+            return None
+        payload = json.loads(body)
+    except Exception:
+        return None
+    user = ((payload or {}).get("data") or {}).get("user")
+    if not isinstance(user, dict) or not user:
+        return None
+    profile = _map_direct_user(user, username)
+    if profile.followers == 0 and not profile.recent_posts:
+        return None
+    return profile
 
 
 async def _fetch_direct_profile(username: str) -> ProfileData:
@@ -2208,6 +2388,17 @@ async def get_profile(username: str) -> ProfileData:
     # Needs zero credentials for public profiles, so unknown handles no
     # longer get fake numbers just because Apify credits ran out.
     if DATA_MODE == "live" and DIRECT_FETCH_ENABLED:
+        # Provider #2a — GraphQL executed INSIDE a real Chrome page (same
+        # origin/cookies as instagram.com's own frontend, so the API that
+        # 401s every HTTP client serves real data here). Preferred over the
+        # HTTP endpoints; falls through on any failure.
+        gql_profile = await _fetch_graphql_profile(username)
+        if gql_profile is not None:
+            gql_profile = await _backfill_missing_likes(gql_profile)
+            await asyncio.to_thread(_disk_profile_set, username, gql_profile)
+            async with _CACHE_LOCK:
+                _profile_cache[username] = (time.monotonic(), gql_profile)
+            return gql_profile
         try:
             profile = await _fetch_direct_profile(username)
         except ValueError:

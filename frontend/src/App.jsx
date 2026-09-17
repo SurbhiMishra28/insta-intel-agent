@@ -8,7 +8,6 @@ import FollowerGrowthIcon from './components/FollowerGrowthIcon.jsx';
 import ResearchProgress from './components/ResearchProgress.jsx';
 import BestTimes from './components/BestTimes.jsx';
 import CadenceTimingMap from './components/CadenceTimingMap.jsx';
-import ReelsInsights from './components/ReelsInsights.jsx';
 import ExtrasGrid from './components/ExtrasGrid.jsx';
 import ReelTimingView from './components/ReelTiming.jsx';
 import HashtagSuggestionView from './components/HashtagSuggestion.jsx';
@@ -17,7 +16,9 @@ import MonthlyReviewer from './components/MonthlyReviewer.jsx';
 import WhitespaceFinder from './components/WhitespaceFinder.jsx';
 import PWAInstallBanner from './components/PWAInstallBanner.jsx';
 import ChatBox from './components/ChatBox.jsx';
-import DataStore from './components/DataStore.jsx';
+import GrowthTracking from './components/GrowthTracking.jsx';
+import HistoryPanel from './components/HistoryPanel.jsx';
+import RestoreView from './components/RestoreView.jsx';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -84,6 +85,34 @@ export default function App() {
   const [trendsData, setTrendsData] = useState(null);
   const [busy, setBusy] = useState({}); // { research: bool, review: bool, ... }
   const [pdfBusy, setPdfBusy] = useState(false);
+  // Bumped after every analysis so the search-history panel re-reads the DB.
+  const [historyKey, setHistoryKey] = useState(0);
+  // Restored account (real stored snapshot served from search history).
+  const [restoreData, setRestoreData] = useState(null);
+  const [restoring, setRestoring] = useState(false);
+  // Handle currently getting its history-data PDF built (empty = idle).
+  const [histPdfBusy, setHistPdfBusy] = useState('');
+
+  // Cut: remove one account's stored data (history + snapshot) from the agent.
+  const cutAccount = async (handle) => {
+    if (!handle) return;
+    setError('');
+    try {
+      const res = await fetch(`${API_URL}/api/history/${encodeURIComponent(handle)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Cut failed (${res.status})`);
+      }
+      // If the cut account is on screen, drop it from the view.
+      const cut = (handle || '').toLowerCase();
+      if (restoreData?.profile?.username?.toLowerCase() === cut) setRestoreData(null);
+      setHistoryKey((k) => k + 1);
+    } catch (err) {
+      setError(err.message || 'Cut failed.');
+    }
+  };
 
   const post = async (path, body) => {
     const res = await fetch(`${API_URL}${path}`, {
@@ -98,13 +127,12 @@ export default function App() {
     return res.json();
   };
 
-  const run = async (e) => {
-    e.preventDefault();
-    const handle = username.trim();
+  const analyze = async (handle) => {
     if (!handle) return;
     setError('');
     setLoading(true);
     setDash(null);
+    setRestoreData(null);
     setResearch(null);
     setReview(null);
     setWhitespace(null);
@@ -119,6 +147,78 @@ export default function App() {
     } finally {
       setLoading(false);
       setStage('');
+      setHistoryKey((k) => k + 1); // the search just got recorded — refresh history
+    }
+  };
+
+  const run = async (e) => {
+    e.preventDefault();
+    const handle = username.trim();
+    if (!handle) return;
+    await analyze(handle);
+  };
+
+  // Download one history account's FULL stored Instagram data as a PDF
+  // (profile, metrics, every stored post, recorded scan history).
+  const historyPdf = async (handle) => {
+    if (!handle || histPdfBusy) return;
+    setHistPdfBusy(handle);
+    try {
+      const res = await fetch(`${API_URL}/api/history-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: handle }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `PDF export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `instaiq-${handle}-history-data.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'PDF export failed.');
+    } finally {
+      setHistPdfBusy('');
+    }
+  };
+
+  // Restore a stored search: serve the account's stored REAL snapshot
+  // (refreshed via keyless Instagram GraphQL when available) — instantly,
+  // without a paid Apify run or a full AI dashboard rebuild.
+  const restoreSearch = async (handle) => {
+    if (loading || restoring) return;
+    setError('');
+    setRestoring(true);
+    setUsername(handle);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    try {
+      const res = await fetch(`${API_URL}/api/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: handle }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Restore failed (${res.status})`);
+      }
+      setDash(null);
+      setResearch(null);
+      setReview(null);
+      setWhitespace(null);
+      setTrendsData(null);
+      setRestoreData(await res.json());
+      setHistoryKey((k) => k + 1);
+    } catch (err) {
+      setError(err.message || 'Restore failed.');
+    } finally {
+      setRestoring(false);
     }
   };
 
@@ -176,11 +276,12 @@ export default function App() {
     ['profile', 'Profile'],
     ['report', 'AI report'],
     ['plan', 'Growth plan'],
+    ['tracking', 'Growth tracking'],
     ['timing', 'Timing'],
     ['toolkit', 'Toolkit'],
     ['trends', 'Trends'],
     ['research', 'Competitors'],
-    ['datastore', 'Data store'],
+    ['history', 'History'],
     ['chat', 'Ask AI'],
   ];
 
@@ -220,8 +321,26 @@ export default function App() {
         </form>
       </header>
 
-      {loading && (
-        <ResearchProgress label={stage || 'Running the full analysis pipeline…'} />
+      {(loading || restoring) && (
+        <ResearchProgress
+          label={restoring && !loading ? 'Restoring stored account data…' : stage || 'Running the full analysis pipeline…'}
+        />
+      )}
+
+      {restoreData && !dash && (
+        <>
+          <RestoreView data={restoreData} />
+          <Section id="history" label="History — accounts you searched · restore or download full data">
+            <HistoryPanel
+              activeHandle={restoreData.profile?.username}
+              onRestore={restoreSearch}
+              onPdf={historyPdf}
+              onCut={cutAccount}
+              pdfBusyHandle={histPdfBusy}
+              refreshKey={historyKey}
+            />
+          </Section>
+        </>
       )}
 
       {dash && main && (
@@ -322,8 +441,14 @@ export default function App() {
             <Report insight={main} />
           </Section>
 
-          <Section id="plan" label="Growth plan — what to post next">
-            <GrowthPlanView plan={dash.plan} />
+          {dash.plan && (
+            <Section id="plan" label="Growth plan — what to post next">
+              <GrowthPlanView plan={dash.plan} />
+            </Section>
+          )}
+
+          <Section id="tracking" label="Growth tracking — what changed since the agent's stored searches">
+            <GrowthTracking api={API_URL} handle={handle} />
           </Section>
 
           <Section id="timing" label="Timing intelligence — when to post">
@@ -332,7 +457,6 @@ export default function App() {
               {dash.cadence_map && <CadenceTimingMap cadenceMap={dash.cadence_map} />}
             </div>
             <div className="grid-2">
-              {dash.reels && <ReelsInsights reels={dash.reels} />}
               {dash.reel_timing && <ReelTimingView reelTiming={dash.reel_timing} />}
             </div>
           </Section>
@@ -455,8 +579,15 @@ export default function App() {
             )}
           </Section>
 
-          <Section id="datastore" label="Data store — every handle the agent has researched">
-            <DataStore api={API_URL} />
+          <Section id="history" label="History — accounts you searched · restore or download full data">
+            <HistoryPanel
+              activeHandle={handle}
+              onRestore={restoreSearch}
+              onPdf={historyPdf}
+              onCut={cutAccount}
+              pdfBusyHandle={histPdfBusy}
+              refreshKey={historyKey}
+            />
           </Section>
 
           <div id="chat">

@@ -11,7 +11,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 import ai_engine
 import analytics
-import datastore
 import scraper
 import storage
 from typing import Optional
@@ -108,29 +107,272 @@ def health():
     return {"status": "healthy"}
 
 
-# ---------------------------------------------------------------------------
-# Profile data store — the browsable record of every handle ever fetched
-# ---------------------------------------------------------------------------
+async def _load_real_history_profile(uname: str):
+    """Best available REAL snapshot for a previously searched handle:
+    fresh disk row → any non-simulated disk row (≤30 days) → keyless
+    Instagram GraphQL refresh (Chrome page fetch, no Apify spend).
+    Returns (profile | None, source). NEVER returns simulated data."""
+    profile = await asyncio.to_thread(scraper._disk_profile_get, uname)
+    if profile is None or getattr(profile, "data_age_hours", None) == -1:
+        stale = await asyncio.to_thread(scraper._disk_profile_get_any, uname)
+        if stale is not None and getattr(stale, "data_age_hours", None) != -1:
+            profile = stale
+    if profile is not None and getattr(profile, "data_age_hours", None) == -1:
+        profile = None  # never serve a simulated row
 
-@app.get("/api/data-store")
-def data_store(username: Optional[str] = Query(None)):
-    """Browse the stored Instagram data. No `username` → all handles (summary)
-    plus store stats and the recent fetch log; with `username` → that handle's
-    full stored profile and every post the agent kept."""
-    if username:
+    if profile is not None:
         try:
-            uname = scraper.normalize_username(username)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        record = datastore.get_profile(uname)
-        if record is None:
-            raise HTTPException(status_code=404, detail=f"@{uname} is not in the data store yet — run an analysis on this handle first.")
-        return {"profile": record, "fetch_log": datastore.fetch_log(uname)}
+            gql = await scraper._fetch_graphql_profile(uname)
+        except Exception:
+            gql = None
+        if gql is not None:
+            await asyncio.to_thread(scraper._disk_profile_set, uname, gql)
+            return gql, "instagram graphql"
+        return profile, "stored snapshot"
+
+    try:
+        gql = await scraper._fetch_graphql_profile(uname)
+    except Exception:
+        gql = None
+    if gql is not None:
+        await asyncio.to_thread(scraper._disk_profile_set, uname, gql)
+        return gql, "instagram graphql"
+    return None, "unavailable"
+
+
+@app.post("/api/restore")
+async def restore(req: AnalyzeRequest):
+    """Restore a previously searched account (search-history restore).
+
+    REAL DATA ONLY: the handle must exist in the agent's recorded scan
+    history (scan_history.db) — accounts never searched through the agent
+    are refused with 404. The stored snapshot of the account (profile_cache
+    .db, always real fetched data) is served instantly and enriched with a
+    keyless Instagram GraphQL refresh (Chrome page fetch) when available;
+    Apify credits are never spent on a restore. If both the stored snapshot
+    and the GraphQL refresh are unavailable the request fails honestly —
+    simulated data is never served."""
+    try:
+        uname = scraper.normalize_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Real-searched-accounts only: must exist in recorded scan history.
+    records, _prev = storage.get_history(uname)
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"@{uname} was never searched by the agent — nothing to "
+                    "restore. Analyze the handle first to record a search."),
+        )
+
+    profile, refreshed_via = await _load_real_history_profile(uname)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"@{uname} has a recorded search but no stored real "
+                    "snapshot could be served and the live GraphQL fetch "
+                    "did not return data. Analyze the handle normally."),
+        )
+
+    insight = await _analyze_one(profile)
+    storage.record_scan(insight)  # the restore is itself a recorded search
     return {
-        "stats": datastore.stats(),
-        "handles": datastore.list_profiles(),
-        "recent_fetches": datastore.fetch_log(limit=30),
+        "profile": insight.profile,
+        "metrics": insight.metrics,
+        "restored_from_history": True,
+        "data_age_hours": profile.data_age_hours,
+        "refreshed_via": refreshed_via,
+        "scan_count": len(records),
     }
+
+
+def _render_history_data_html(profile, metrics, records, source) -> str:
+    """Printable HTML for one previously searched account's FULL stored
+    Instagram data: profile, metrics, every stored post and the recorded
+    scan history. Light theme, same styling as the main report."""
+    p, m = profile, metrics
+    posts = p.recent_posts or []
+    now = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    def _post_date(post):
+        if getattr(post, "posted_at", None):
+            try:
+                return str(post.posted_at)[:10]
+            except Exception:
+                return "—"
+        d = getattr(post, "posted_days_ago", None)
+        return f"{d}d ago" if d is not None else "—"
+
+    def _views(post):
+        v = getattr(post, "views", None)
+        return f"{v:,}" if isinstance(v, int) and v > 0 else "hidden"
+
+    rows = "".join(
+        f"<tr><td>{_esc(_post_date(x))}</td>"
+        f"<td>{_esc(getattr(x, 'media_type', '') or 'post')}</td>"
+        f"<td>{getattr(x, 'likes', 0):,}</td>"
+        f"<td>{getattr(x, 'comments', 0):,}</td>"
+        f"<td>{_views(x)}</td>"
+        f"<td>{_esc(' '.join(((getattr(x, 'caption', '') or ''))[:180].split()))}"
+        f"{'…' if len((getattr(x, 'caption', '') or '')) > 180 else ''}</td></tr>"
+        for x in posts
+    ) or '<tr><td colspan="6" class="muted">No posts stored for this account.</td></tr>'
+
+    scan_rows = "".join(
+        f"<tr><td>{_esc(str(r.scanned_at)[:19].replace('T', ' '))}</td>"
+        f"<td>{r.followers:,}</td><td>{r.engagement_rate}%</td>"
+        f"<td>{r.avg_likes:,.0f}</td><td>{r.posting_frequency_per_week}</td>"
+        f"<td>{('+' if r.followers_delta > 0 else '') + f'{r.followers_delta:,}'}</td></tr>"
+        for r in records
+    )
+
+    age = getattr(p, "data_age_hours", None)
+    age_note = (
+        f"data age ~{age:.0f}h" if isinstance(age, (int, float)) and age >= 0 else ""
+    )
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<style>
+@page {{ size: A4; margin: 14mm 12mm; }}
+* {{ box-sizing: border-box; }}
+body {{ font-family: 'Segoe UI', Calibri, Arial, sans-serif; color: #1a1f24;
+        font-size: 10.5pt; line-height: 1.55; margin: 0; }}
+h1 {{ font-size: 20pt; margin: 0 0 4px; }}
+h2 {{ font-size: 13pt; color: #141a2e; border-bottom: 2px solid #16a34a;
+     padding-bottom: 4px; margin: 26px 0 10px; page-break-after: avoid; }}
+.cover {{ border-bottom: 3px solid #16a34a; padding-bottom: 14px; margin-bottom: 6px; }}
+.cover .tag {{ color: #4b5563; font-size: 10pt; margin: 0 0 10px; }}
+.stats {{ display: flex; flex-wrap: wrap; gap: 10px 26px; margin: 10px 0 2px; }}
+.stat b {{ display: block; font-size: 15pt; }}
+.stat span {{ color: #4b5563; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }}
+.pill {{ display: inline-block; background: #16a34a; color: #fff; border-radius: 999px;
+        padding: 2px 10px; font-size: 8.5pt; font-weight: 700; margin-left: 8px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 6px 0; }}
+th, td {{ text-align: left; padding: 5px 8px; border-bottom: 1px solid #e5e7eb;
+         font-size: 9.5pt; vertical-align: top; }}
+th {{ color: #4b5563; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }}
+.muted {{ color: #4b5563; }}
+.note {{ background: #fef3c7; border-left: 3px solid #d97706; padding: 8px 12px;
+         font-size: 9.5pt; margin: 8px 0; }}
+footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px solid #e5e7eb; padding-top: 8px; }}
+</style></head><body>
+<div class="cover">
+  <h1>@{_esc(p.username)}{_esc(' · ' + p.full_name) if p.full_name else ''}
+      <span class="pill">RESTORED ACCOUNT</span>
+      {'' if not p.is_verified else '<span class="pill">VERIFIED</span>'}
+  </h1>
+  <p class="tag">InstaIQ · Stored account data · restored from the agent's search history · {now}</p>
+  <p class="muted">{_esc(p.bio or '')}</p>
+  <div class="stats">
+    <div class="stat"><b>{p.followers:,}</b><span>Followers</span></div>
+    <div class="stat"><b>{p.following:,}</b><span>Following</span></div>
+    <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
+    <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
+    <div class="stat"><b>{m.avg_likes:,.0f}</b><span>Avg likes / post</span></div>
+    <div class="stat"><b>{m.avg_comments:,.0f}</b><span>Avg comments / post</span></div>
+    <div class="stat"><b>{m.posting_frequency_per_week}</b><span>Posts / week</span></div>
+    <div class="stat"><b style="text-transform:capitalize">{_esc(m.best_content_type)}</b><span>Top format</span></div>
+  </div>
+</div>
+<div class="note">Data source: {source} (real fetched data only){' · ' + age_note if age_note else ''} · {len(records)} recorded search(es) by the agent.</div>
+<h2>Stored posts ({len(posts)})</h2>
+<table>
+<tr><th>Date</th><th>Type</th><th>Likes</th><th>Comments</th><th>Views</th><th>Caption</th></tr>
+{rows}
+</table>
+<h2>Recorded search history ({len(records)})</h2>
+<table>
+<tr><th>Scanned at</th><th>Followers</th><th>ER</th><th>Avg likes</th><th>Posts/wk</th><th>Δ Followers</th></tr>
+{scan_rows}
+</table>
+<footer>InstaIQ restores only accounts previously searched by the agent and only real fetched data — simulated content is never included.</footer>
+</body></html>"""
+
+
+@app.post("/api/history-pdf")
+async def history_pdf(req: AnalyzeRequest):
+    """Download the FULL stored Instagram data of one previously searched
+    account as a PDF: profile, metrics, every stored post and the recorded
+    scan history. Real accounts only — the handle must exist in the agent's
+    scan history; simulated data is never served or printed."""
+    from fastapi.responses import JSONResponse
+    try:
+        uname = scraper.normalize_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    records, _prev = storage.get_history(uname)
+    if not records:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"@{uname} was never searched by the agent — nothing to "
+                    "export. Analyze the handle first to record a search."),
+        )
+
+    profile, source = await _load_real_history_profile(uname)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"@{uname} has a recorded search but no stored real "
+                    "snapshot could be served and the live GraphQL fetch "
+                    "did not return data. Analyze the handle normally."),
+        )
+
+    metrics = ai_engine.compute_metrics(profile)
+    html = _render_history_data_html(profile, metrics, records, source)
+    try:
+        pdf = await asyncio.get_event_loop().run_in_executor(
+            _LLM_POOL, _chrome_print_pdf, html
+        )
+    except RuntimeError as e:
+        return JSONResponse(status_code=503, content={"detail": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=502, content={"detail": f"PDF export failed: {e}"})
+    filename = f"instaiq-{uname}-history-data.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.delete("/api/history/{username}")
+def cut_account(username: str):
+    """Cut: forget one account entirely. Removes its recorded search history
+    AND its stored profile snapshot/discovery caches. Real accounts that were
+    never searched return 404 — there is nothing to cut."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    removed_rows = storage.clear_history(uname)
+    purged = scraper.purge_account(uname)
+    if removed_rows == 0 and purged["profile_snapshot"] == 0:
+        raise HTTPException(status_code=404, detail=f"No stored data for @{uname}.")
+    return {
+        "ok": True,
+        "username": uname,
+        "scan_history_rows_removed": removed_rows,
+        "profile_snapshots_removed": purged["profile_snapshot"],
+        "discovery_caches_removed": purged["discovery_caches"],
+    }
+
+
+@app.get("/api/growth-tracking")
+def growth_tracking(username: str = Query(...)):
+    """Growth tracking for one handle, built from the agent's stored search
+    history: the latest recorded scan vs the previous scan, 1 week ago and
+    1 month ago. Every delta is computed from real stored measurements —
+    when a baseline doesn't exist yet the response says so honestly."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    comparison = storage.get_growth_comparison(uname)
+    records, _previous = storage.get_history(uname)
+    comparison["history"] = records
+    return comparison
 
 
 @app.get("/api/usage")
@@ -197,6 +439,27 @@ def history(username: str = Query(..., min_length=1)):
         raise HTTPException(status_code=400, detail=str(e))
     records, _previous = storage.get_history(uname)
     return {"username": uname, "scans": records, "scan_count": len(records)}
+
+
+@app.get("/api/recent-searches")
+def recent_searches(limit: int = Query(30, ge=1, le=100)):
+    """Every account the agent has searched, newest first, with the metrics
+    from its latest scan and how many times it was searched. Powers the
+    search-history restore in the UI."""
+    return {"searches": storage.recent_searches(limit)}
+
+
+@app.delete("/api/recent-searches/{username}")
+def delete_search_history(username: str):
+    """Forget one handle's stored search history (all its scan rows)."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    removed = storage.clear_history(uname)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail=f"No stored searches for @{uname}.")
+    return {"ok": True, "username": uname, "removed": removed}
 
 
 def _data_quality_warning(insight: ProfileInsight) -> str:
@@ -1120,6 +1383,18 @@ async def chat(req: ChatRequest):
         try:
             profile = await scraper.get_profile(handle)
             metrics = ai_engine.compute_metrics(profile)
+            # Growth tracking: every real fetch of a handle is a timeline
+            # point (skipped for simulated data — history stays real-only).
+            if getattr(profile, "data_age_hours", None) != -1:
+                storage.record_metrics(
+                    profile.username,
+                    followers=profile.followers,
+                    engagement_rate=metrics.engagement_rate,
+                    avg_likes=metrics.avg_likes,
+                    posting_frequency_per_week=metrics.posting_frequency_per_week,
+                    posts_count=profile.posts_count,
+                    avg_comments=metrics.avg_comments,
+                )
             top_posts = sorted(
                 profile.recent_posts, key=lambda p: p.likes + p.comments, reverse=True
             )[:3]
