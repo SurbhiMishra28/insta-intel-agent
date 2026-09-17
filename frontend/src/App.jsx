@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import ProfileReadout from './components/ProfileReadout.jsx';
+import ProfileReadout, { AvgCommentBreakdown } from './components/ProfileReadout.jsx';
 import RankingBars from './components/RankingBars.jsx';
 import EngagementChart from './components/EngagementChart.jsx';
 import Report from './components/Report.jsx';
@@ -412,6 +412,7 @@ export default function App() {
               {/* Compact readout: the stats the hero card doesn't already show.
                   The profile lives ONLY here — no duplicate section below. */}
               <ProfileReadout insight={main} compact />
+              <AvgCommentBreakdown insight={main} />
             </div>
           </div>
 

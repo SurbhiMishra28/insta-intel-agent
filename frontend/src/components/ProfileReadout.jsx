@@ -6,6 +6,59 @@ function fmt(n) {
   return String(n);
 }
 
+/* Per-post engagement breakdown for the recent sample — makes the averages
+   transparent: avg likes/comments are literally the sum of these rows
+   divided by the count. Every number comes straight from Instagram. */
+export function PostBreakdown({ profile }) {
+  const posts = (profile?.recent_posts || []).filter(
+    (p) => p && (p.likes > 0 || p.comments > 0 || p.id),
+  );
+  if (posts.length === 0) return null;
+  const totalLikes = posts.reduce((s, p) => s + (p.likes || 0), 0);
+  const totalComments = posts.reduce((s, p) => s + (p.comments || 0), 0);
+  return (
+    <div className="post-breakdown" style={{ marginTop: 14 }}>
+      <p className="section-label" style={{ marginBottom: 6 }}>
+        Last {posts.length} posts — the data behind the averages
+      </p>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ textAlign: 'left', color: 'var(--paper-dim)', fontSize: 11 }}>
+              <th style={{ padding: '4px 8px' }}>#</th>
+              <th style={{ padding: '4px 8px' }}>Likes</th>
+              <th style={{ padding: '4px 8px' }}>Comments</th>
+              <th style={{ padding: '4px 8px' }}>Posted</th>
+              <th style={{ padding: '4px 8px' }}>Caption</th>
+            </tr>
+          </thead>
+          <tbody>
+            {posts.map((p, i) => (
+              <tr key={p.id || i} style={{ borderTop: '1px solid var(--hairline)' }}>
+                <td style={{ padding: '4px 8px', color: 'var(--paper-dim)' }}>{i + 1}</td>
+                <td style={{ padding: '4px 8px' }}>{(p.likes || 0).toLocaleString()}</td>
+                <td style={{ padding: '4px 8px' }}>{(p.comments || 0).toLocaleString()}</td>
+                <td style={{ padding: '4px 8px', color: 'var(--paper-dim)' }}>
+                  {p.posted_days_ago != null ? `${p.posted_days_ago}d ago` : '—'}
+                </td>
+                <td style={{ padding: '4px 8px', color: 'var(--paper-dim)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {(p.caption || '').slice(0, 80) || '(no caption)'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--paper-dim)', margin: '6px 0 0' }}>
+        Avg likes = {totalLikes.toLocaleString()} ÷ {posts.length} ={' '}
+        <b>{(totalLikes / posts.length).toLocaleString(undefined, { maximumFractionDigits: 1 })}</b>
+        {' · '}Avg comments = {totalComments.toLocaleString()} ÷ {posts.length} ={' '}
+        <b>{(totalComments / posts.length).toLocaleString(undefined, { maximumFractionDigits: 1 })}</b>
+      </p>
+    </div>
+  );
+}
+
 /* Compact mode: rendered INSIDE the dashboard hero card. Shows only the
    metrics the hero card itself does not already display, so the profile
    appears exactly once on the page. */
@@ -164,4 +217,11 @@ export default function ProfileReadout({ insight, compact = false }) {
   return compact
     ? <CompactReadout profile={profile} metrics={metrics} />
     : <FullReadout profile={profile} metrics={metrics} />;
+}
+
+/* Standalone per-post table with the avg calculation shown explicitly —
+   use where the full per-post transparency is wanted (dashboard hero). */
+export function AvgCommentBreakdown({ insight }) {
+  if (!insight?.profile) return null;
+  return <PostBreakdown profile={insight.profile} />;
 }

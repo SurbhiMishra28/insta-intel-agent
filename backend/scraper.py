@@ -189,6 +189,12 @@ _CACHE_LOCK = asyncio.Lock()
 
 _CACHE_DB = os.getenv("PROFILE_CACHE_DB", os.path.join(os.path.dirname(__file__), "profile_cache.db"))
 
+# Bump when the mapping/fetch pipeline changes in a way that changes the
+# DATA content of cached rows. Rows written by an older pipeline version are
+# ignored (treated as expired), so pre-fix snapshots with broken comment
+# counts are never served again — a fresh real fetch happens instead.
+_CACHE_SCHEMA_VERSION = int(os.getenv("PROFILE_CACHE_SCHEMA", "2"))
+
 _DISK_TTL_PROFILE = int(os.getenv("PROFILE_DISK_TTL", str(7 * 86400)))   # fresh enough for metrics
 _DISK_TTL_DISCOVERY = int(os.getenv("DISCOVERY_DISK_TTL", str(24 * 3600)))  # competitor lists drift slowly
 
@@ -231,6 +237,7 @@ def _cache_set(key: str, value: Any) -> None:
 
 def _profile_to_json(p: ProfileData) -> dict:
     d = p.model_dump()
+    d["cache_schema"] = _CACHE_SCHEMA_VERSION
     for post in d["recent_posts"]:
         for k in ("likes", "comments", "views", "posted_days_ago"):
             post[k] = int(post.get(k) or 0)
@@ -240,6 +247,12 @@ def _profile_to_json(p: ProfileData) -> dict:
 
 
 def _profile_from_json(d: dict) -> ProfileData:
+    d = dict(d)
+    # Rows written by an older pipeline carry a missing/older schema stamp.
+    # Their comment counts may predate the mapping fixes, so refuse to serve
+    # them as fresh data — the caller re-fetches instead.
+    if int(d.get("cache_schema") or 0) < _CACHE_SCHEMA_VERSION:
+        raise ValueError("stale cache schema")
     d["recent_posts"] = d.get("recent_posts") or []
     return ProfileData(**d)
 
