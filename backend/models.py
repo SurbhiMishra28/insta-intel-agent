@@ -15,6 +15,12 @@ class Post(BaseModel):
     media_type: str = "image"  # image | video | carousel | reel
     views: int = 0                     # video/reel view count (0 when not a video)
     posted_at: Optional[str] = None    # ISO timestamp when available
+    # True when the source feed node OMITTED the comment field entirely (xdt
+    # / web GraphQL nodes do this routinely). An omitted field parses to 0,
+    # which used to masquerade as "genuinely no comments". Such posts are
+    # comment-suspects: the permalink backfill resolves them to the REAL
+    # count (which may still be a genuine 0) and clears the flag.
+    comment_count_omitted: bool = False
 
 
 class ProfileData(BaseModel):
@@ -41,6 +47,7 @@ class ProfileMetrics(BaseModel):
     best_content_type: str
     avg_views: float = 0        # avg video/reel views (0 when none in sample)
     reels_count: int = 0        # reels/videos with real view data in the sample
+    comments_unresolved_in_sample: int = 0  # posts whose comment count the feed omitted and backfill didn't resolve
 
 
 class ProfileInsight(BaseModel):

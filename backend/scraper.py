@@ -525,18 +525,29 @@ def _map_post(p: Dict[str, Any], idx: int, owner: str) -> Optional[Post]:
 
     hashtags = sorted({f"#{h.lower()}" for h in re.findall(r"#(\w+)", caption)})[:10]
 
+    # Distinguish "source feed omitted the comment field" (xdt/web GraphQL
+    # nodes routinely do) from "genuinely zero comments": an omitted field
+    # parses to 0 and used to masquerade as a real zero until the permalink
+    # backfill resolved it.
+    comment_value = _pick(p, (
+        "commentsCount", "commentCount", "comment_count",
+        "edge_media_to_comment.count",
+    ))
+    comment_omitted = comment_value is None
+
     return Post(
         # Prefer the shortcode: it is stable across providers and is what the
         # permalink backfill needs to re-address a post.
         id=str(_pick(p, ("shortCode", "shortcode", "code", "id", "url"))) or f"{owner}_{idx}",
         caption=caption[:600],
         likes=likes,
-        comments=comments,
+        comments=_to_int(comment_value),
         posted_days_ago=_posted_days_ago(p),
         hashtags=hashtags,
         media_type=media_type,
         views=views,
         posted_at=posted_at_iso,
+        comment_count_omitted=comment_omitted,
     )
 
 
@@ -1464,11 +1475,20 @@ async def _enrich_with_permalink_posts(
 
 
 async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
-    """Fill posts whose like counts Instagram hid (big accounts hide likes;
-    xdt feed nodes omit like_count) with REAL numbers from their permalink
-    pages: instagram.com/p/<code>/ still exposes "N likes, M comments - user
-    on date: caption" in og:description. Headless-Chrome renders are
-    throttle-proof, so this keeps working when the API endpoints block us.
+    """Fill posts whose engagement counts Instagram hid with REAL numbers
+    from their permalink pages: instagram.com/p/<code>/ still exposes
+    "N likes, M comments - user on date: caption" in og:description.
+    Headless-Chrome renders are throttle-proof, so this keeps working when
+    the API endpoints block us.
+
+    Two distinct zero sources are repaired here:
+      - HIDDEN likes (big accounts hide likes; xdt feed nodes omit
+        like_count) — filled from the permalink metadata.
+      - OMITTED comments (xdt/web nodes frequently carry no comment_count
+        field at all) — a missing field parses to 0, so real comments were
+        silently dropped before this backfill existed. A post is "comment
+        suspect" when the source feed actually omitted the field, tracked
+        via `comment_count_omitted` on the mapped Post.
 
     Best-effort and bounded: IG_LIKE_BACKFILL env caps the total seconds
     spent (0 disables); per-post failure leaves the post untouched. Every
@@ -1476,7 +1496,16 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
     budget = float(os.getenv("IG_LIKE_BACKFILL", "75"))
     if budget <= 0 or profile is None or not profile.recent_posts:
         return profile
-    if not any(p.likes == 0 for p in profile.recent_posts):
+
+    def _needs_fix(post: Post) -> bool:
+        if post.likes == 0:
+            return True
+        # xdt/web nodes omit comment_count entirely (absent field, not a
+        # real zero). Such posts are comment-suspects until the permalink
+        # tells us the true number.
+        return bool(getattr(post, "comment_count_omitted", False))
+
+    if not any(_needs_fix(p) for p in profile.recent_posts):
         return profile
     import shutil as _shutil
     if not _find_chrome():
@@ -1486,7 +1515,7 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
     max_posts = int(os.getenv("IG_PERMALINK_POSTS", "6"))
     fixed = 0
     for post in profile.recent_posts:
-        if post.likes > 0 or fixed >= max_posts or time.monotonic() >= deadline:
+        if not _needs_fix(post) or fixed >= max_posts or time.monotonic() >= deadline:
             continue
         if not re.fullmatch(r"[A-Za-z0-9_-]{5,}", post.id or ""):
             continue  # synthetic id (no shortcode) — nothing to re-address
@@ -1499,16 +1528,25 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
             if not dom:
                 continue
             p = _parse_post_permalink_dom(dom, post.id, post.media_type)
-            if p is not None and p.likes > 0:
+            if p is None:
+                continue
+            if p.likes > 0 and post.likes == 0:
                 post.likes = p.likes
-                if post.comments == 0 and p.comments:
-                    post.comments = p.comments
-                if not post.caption and p.caption:
-                    post.caption = p.caption
-                if not post.posted_at and p.posted_at:
-                    post.posted_at = p.posted_at
-                    post.posted_days_ago = p.posted_days_ago
                 fixed += 1
+            # A comment-suspect post (source omitted comment_count) gets the
+            # permalink's REAL count — including a genuine 0 — and the
+            # suspect flag is cleared either way. This is the path that used
+            # to be skipped when likes were already present, leaving real
+            # comments at 0 for accounts fetched via the xdt feed.
+            if getattr(post, "comment_count_omitted", False):
+                post.comments = p.comments  # real value, even when it is 0
+                post.comment_count_omitted = False
+                fixed += 1
+            if not post.caption and p.caption:
+                post.caption = p.caption
+            if not post.posted_at and p.posted_at:
+                post.posted_at = p.posted_at
+                post.posted_days_ago = p.posted_days_ago
         except (asyncio.TimeoutError, Exception):
             continue  # one bad render must not block the rest
         await asyncio.sleep(0.8)  # pace headless launches

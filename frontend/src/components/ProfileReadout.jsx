@@ -128,6 +128,11 @@ function FullReadout({ profile, metrics }) {
         <div className="stat">
           <div className="num">{fmt(Math.round(metrics.avg_comments || 0))}</div>
           <div className="label">Avg. comments / post</div>
+          {metrics.comments_unresolved_in_sample > 0 && (
+            <div className="label" style={{ fontSize: 11, opacity: 0.7 }}>
+              count unavailable for {metrics.comments_unresolved_in_sample} of sampled posts
+            </div>
+          )}
         </div>
         {metrics.reels_count > 0 && (
           <div className="stat">

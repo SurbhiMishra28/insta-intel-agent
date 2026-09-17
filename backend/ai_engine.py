@@ -170,6 +170,13 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
         engagement_by_type, key=lambda k: statistics.mean(engagement_by_type[k])
     ) if engagement_by_type else "n/a"
 
+    # Honesty flag: posts whose comment counts were never resolved because
+    # the source feed omitted comment_count and the permalink backfill did
+    # not get to them. A 0 in that case is "unknown", not "genuinely zero".
+    unresolved_comments = sum(
+        1 for p in posts if getattr(p, "comment_count_omitted", False)
+    )
+
     return ProfileMetrics(
         engagement_rate=engagement_rate,
         avg_likes=round(avg_likes, 1),
@@ -180,6 +187,7 @@ def compute_metrics(profile: ProfileData) -> ProfileMetrics:
         best_content_type=best_content_type,
         avg_views=round(avg_views, 1),
         reels_count=reels_count,
+        comments_unresolved_in_sample=unresolved_comments,
     )
 
 
