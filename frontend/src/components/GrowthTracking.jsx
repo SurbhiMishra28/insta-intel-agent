@@ -16,7 +16,13 @@ const timeAgo = (iso) => {
 const dateShort = (iso) =>
   iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
 
-const fmtNum = (n) => (n == null ? '—' : n >= 1000 ? n.toLocaleString('en-US') : String(Math.round(n)));
+const fmtNum = (n) => {
+  if (n == null) return '—';
+  // Non-integer metrics (avg comments 0.2, cadence 1.75) must keep their
+  // decimals — rounding them to "0" made real data look missing.
+  if (!Number.isInteger(n)) return n.toFixed(1);
+  return n >= 1000 ? n.toLocaleString('en-US') : String(n);
+};
 
 const fmtDelta = (d, digits = 0) => {
   if (d == null) return null;
@@ -151,6 +157,9 @@ export default function GrowthTracking({ api, handle }) {
                 <span className="gt-history-val">{fmtNum(s.followers)} followers</span>
                 <span className="gt-history-val">{s.engagement_rate}% ER</span>
                 <span className="gt-history-val">{fmtNum(s.avg_likes)} avg likes</span>
+                {s.avg_comments != null && (
+                  <span className="gt-history-val">{fmtNum(s.avg_comments)} avg comments</span>
+                )}
                 <span className="gt-history-val">{s.posting_frequency_per_week}/wk</span>
                 {s.followers_delta !== 0 && (
                   <span className={`gt-history-delta ${s.followers_delta > 0 ? 'up' : 'down'}`}>

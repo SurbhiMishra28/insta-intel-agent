@@ -247,6 +247,8 @@ class ScanRecord(BaseModel):
     engagement_rate: float
     avg_likes: float
     posting_frequency_per_week: float
+    posts_count: Optional[int] = None      # None on pre-migration scan rows
+    avg_comments: Optional[float] = None   # None on pre-migration scan rows
     followers_delta: int = 0        # vs previous scan
     er_delta: float = 0
 

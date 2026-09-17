@@ -108,7 +108,8 @@ def get_history(username: str) -> Tuple[List[ScanRecord], Optional[ScanRecord]]:
     try:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT scanned_at, followers, engagement_rate, avg_likes, posting_frequency_per_week "
+                "SELECT scanned_at, followers, engagement_rate, avg_likes, posting_frequency_per_week, "
+                "posts_count, avg_comments "
                 "FROM scans WHERE username = ? ORDER BY scanned_at ASC",
                 (username.lower(),),
             ).fetchall()
@@ -122,10 +123,12 @@ def get_history(username: str) -> Tuple[List[ScanRecord], Optional[ScanRecord]]:
             engagement_rate=er,
             avg_likes=al,
             posting_frequency_per_week=cad,
+            posts_count=pc,
+            avg_comments=ac,
             followers_delta=0,
             er_delta=0.0,
         )
-        for ts, f, er, al, cad in rows
+        for ts, f, er, al, cad, pc, ac in rows
     ]
     for i in range(1, len(records)):
         records[i].followers_delta = records[i].followers - records[i - 1].followers
