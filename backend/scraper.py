@@ -976,7 +976,12 @@ def _map_direct_user(user: Dict[str, Any], requested: str) -> ProfileData:
     )
 
 
-_chrome_semaphore = asyncio.Semaphore(1)  # serialize headless launches
+_chrome_semaphore = asyncio.Semaphore(1)  # serialize headless profile-page launches
+# Post-permalink renders are tiny pages and independent of each other, so a
+# few can run concurrently — sequential rendering made the like/comment
+# backfill the slowest step of a cold fetch (~8s x N posts one-by-one).
+_PERMALINK_CONCURRENCY = int(os.getenv("IG_PERMALINK_CONCURRENCY", "3"))
+_permalink_semaphore = asyncio.Semaphore(max(1, _PERMALINK_CONCURRENCY))
 
 
 def _find_chrome() -> Optional[str]:
@@ -1450,25 +1455,29 @@ async def _enrich_with_permalink_posts(
     if not links:
         return profile
     max_posts = int(os.getenv("IG_PERMALINK_POSTS", "6"))  # headless renders are slow
-    posts: List[Post] = []
-    for i, (code, kind) in enumerate(links):
-        if time.monotonic() >= deadline_ts or len(posts) >= max_posts:
-            break
-        if i:
-            await asyncio.sleep(0.8)  # pace headless launches
+    targets = links[:max_posts]
+
+    async def _render_one(seq: int, code: str, kind: str) -> Optional[Post]:
+        if seq and time.monotonic() >= deadline_ts:
+            return None
+        if seq:
+            await asyncio.sleep(0.3 * seq)  # gentle stagger, not full serialization
         url = f"https://www.instagram.com/{'reel' if kind == 'reel' else 'p'}/{code}/"
         try:
-            async with _chrome_semaphore:
+            async with _permalink_semaphore:
                 post_dom = await asyncio.wait_for(
-                    asyncio.to_thread(_chrome_dump_sync, url, 7000), timeout=50
+                    asyncio.to_thread(_chrome_dump_sync, url, 5000), timeout=40
                 )
             if not post_dom:
-                continue
-            p = _parse_post_permalink_dom(post_dom, code, kind)
-            if p is not None:
-                posts.append(p)
+                return None
+            return _parse_post_permalink_dom(post_dom, code, kind)
         except (asyncio.TimeoutError, Exception):
-            continue  # one bad post must not block the rest
+            return None  # one bad post must not block the rest
+
+    rendered = await asyncio.gather(
+        *(_render_one(i, code, kind) for i, (code, kind) in enumerate(targets))
+    )
+    posts = [p for p in rendered if p is not None]
     if posts:
         profile.recent_posts = posts
     return profile
@@ -1513,26 +1522,29 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
 
     deadline = time.monotonic() + budget
     max_posts = int(os.getenv("IG_PERMALINK_POSTS", "6"))
-    fixed = 0
-    for post in profile.recent_posts:
-        if not _needs_fix(post) or fixed >= max_posts or time.monotonic() >= deadline:
-            continue
-        if not re.fullmatch(r"[A-Za-z0-9_-]{5,}", post.id or ""):
-            continue  # synthetic id (no shortcode) — nothing to re-address
+
+    suspects = [
+        post for post in profile.recent_posts
+        if _needs_fix(post)
+        and re.fullmatch(r"[A-Za-z0-9_-]{5,}", post.id or "")
+    ][:max_posts]
+    if not suspects:
+        return profile
+
+    async def _fix_one(post: Post) -> None:
         url = f"https://www.instagram.com/{'reel' if post.media_type == 'reel' else 'p'}/{post.id}/"
         try:
-            async with _chrome_semaphore:
+            async with _permalink_semaphore:
                 dom = await asyncio.wait_for(
-                    asyncio.to_thread(_chrome_dump_sync, url, 7000), timeout=50
+                    asyncio.to_thread(_chrome_dump_sync, url, 5000), timeout=40
                 )
             if not dom:
-                continue
+                return
             p = _parse_post_permalink_dom(dom, post.id, post.media_type)
             if p is None:
-                continue
+                return
             if p.likes > 0 and post.likes == 0:
                 post.likes = p.likes
-                fixed += 1
             # A comment-suspect post (source omitted comment_count) gets the
             # permalink's REAL count — including a genuine 0 — and the
             # suspect flag is cleared either way. This is the path that used
@@ -1541,15 +1553,17 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
             if getattr(post, "comment_count_omitted", False):
                 post.comments = p.comments  # real value, even when it is 0
                 post.comment_count_omitted = False
-                fixed += 1
             if not post.caption and p.caption:
                 post.caption = p.caption
             if not post.posted_at and p.posted_at:
                 post.posted_at = p.posted_at
                 post.posted_days_ago = p.posted_days_ago
         except (asyncio.TimeoutError, Exception):
-            continue  # one bad render must not block the rest
-        await asyncio.sleep(0.8)  # pace headless launches
+            return  # one bad render must not block the rest
+
+    # Renders are independent tiny pages — run them concurrently (bounded by
+    # the permalink semaphore) instead of ~8s one-by-one.
+    await asyncio.gather(*(_fix_one(post) for post in suspects))
     return profile
 
 

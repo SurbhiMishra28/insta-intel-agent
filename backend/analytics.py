@@ -231,9 +231,9 @@ def explain_account_score(insight: ProfileInsight) -> dict:
 
     com_pct = round(c["comments"] * 100)
     if com_pct >= 60:
-        drivers.append(f"Comments average {m.avg_comments:,.0f}/post — a real community signal that likes alone don't prove.")
+        drivers.append(f"Comments average {m.avg_comments:,.1f}/post — a real community signal that likes alone don't prove.")
     elif com_pct <= 25:
-        drainers.append(f"Comments average only {m.avg_comments:,.0f}/post — add questions/CTAs to convert viewers into commenters.")
+        drainers.append(f"Comments average only {m.avg_comments:,.1f}/post — add questions/CTAs to convert viewers into commenters.")
 
     if m.reels_count == 0:
         drainers.append("No reels with view data in the recent sample — the strongest reach format is unused.")

@@ -212,7 +212,7 @@ Verified: {profile.is_verified} | Business: {profile.is_business}
 Followers: {profile.followers:,} | Following: {profile.following:,} | Total posts: {profile.posts_count:,}
 Bio: {profile.bio or '(none)'}
 Engagement rate: {m.engagement_rate}% ({_rate_engagement(m.engagement_rate)})
-Avg likes/post: {m.avg_likes:,.0f} | Avg comments/post: {m.avg_comments:,.0f}
+Avg likes/post: {m.avg_likes:,.0f} | Avg comments/post: {m.avg_comments:,.2f}
 Posting frequency: {m.posting_frequency_per_week}/week
 Best performing format: {m.best_content_type}
 Top hashtags: {', '.join(m.top_hashtags) if m.top_hashtags else '(none)'}"""

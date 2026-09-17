@@ -63,7 +63,7 @@ export default function RestoreView({ data }) {
               <div className="label">Engagement rate</div>
             </div>
             <div className="stat">
-              <div className="num">{fmt(m.avg_comments != null ? Math.round(m.avg_comments) : null)}</div>
+              <div className="num">{m.avg_comments != null ? m.avg_comments.toFixed(1) : null}</div>
               <div className="label">Avg comments</div>
             </div>
             <div className="stat">

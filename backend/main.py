@@ -270,7 +270,7 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
     <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
     <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
     <div class="stat"><b>{m.avg_likes:,.0f}</b><span>Avg likes / post</span></div>
-    <div class="stat"><b>{m.avg_comments:,.0f}</b><span>Avg comments / post</span></div>
+    <div class="stat"><b>{m.avg_comments:,.1f}</b><span>Avg comments / post</span></div>
     <div class="stat"><b>{m.posting_frequency_per_week}</b><span>Posts / week</span></div>
     <div class="stat"><b style="text-transform:capitalize">{_esc(m.best_content_type)}</b><span>Top format</span></div>
   </div>
@@ -905,7 +905,7 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
     <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
     <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
     <div class="stat"><b>{m.avg_likes:,.0f}</b><span>Avg likes / post</span></div>
-    <div class="stat"><b>{m.avg_comments:,.0f}</b><span>Avg comments / post</span></div>
+    <div class="stat"><b>{m.avg_comments:,.1f}</b><span>Avg comments / post</span></div>
     <div class="stat"><b>{m.posting_frequency_per_week}</b><span>Posts / week</span></div>
     <div class="stat"><b style="text-transform:capitalize">{_esc(m.best_content_type)}</b><span>Top format</span></div>
   </div>
@@ -1403,7 +1403,7 @@ async def chat(req: ChatRequest):
                 "followers": f"{profile.followers:,}",
                 "engagement rate": f"{metrics.engagement_rate}%",
                 "avg likes/post": f"{metrics.avg_likes:,.0f}",
-                "avg comments/post": f"{metrics.avg_comments:,.0f}",
+                "avg comments/post": f"{metrics.avg_comments:,.1f}",
                 "posting frequency": f"{metrics.posting_frequency_per_week}/week",
                 "best format": metrics.best_content_type or "n/a",
                 "top hashtags": ", ".join(metrics.top_hashtags[:5]) or "none",

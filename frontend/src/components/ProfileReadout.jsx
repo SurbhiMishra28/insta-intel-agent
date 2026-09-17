@@ -126,7 +126,7 @@ function FullReadout({ profile, metrics }) {
           <div className="label">Avg. likes / post</div>
         </div>
         <div className="stat">
-          <div className="num">{fmt(Math.round(metrics.avg_comments || 0))}</div>
+          <div className="num">{(metrics.avg_comments || 0).toFixed(1)}</div>
           <div className="label">Avg. comments / post</div>
           {metrics.comments_unresolved_in_sample > 0 && (
             <div className="label" style={{ fontSize: 11, opacity: 0.7 }}>
