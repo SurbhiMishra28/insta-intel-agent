@@ -432,6 +432,28 @@ def _to_int(v: Any) -> int:
         return 0
 
 
+_POST_COUNT_MULT_STR = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
+
+
+def _parse_count_string(raw: str) -> int:
+    """Parse humanized count strings Instagram sometimes emits:
+    '1,944' -> 1944; '1.9K' -> 1900; '352K' -> 352000; '2M' -> 2000000.
+    Anything unparseable becomes 0."""
+    text = (raw or "").strip().replace(",", "")
+    if not text:
+        return 0
+    m = re.fullmatch(r"([\d.]+)\s*([KMBkmb])", text)
+    if m:
+        try:
+            return int(float(m.group(1)) * _POST_COUNT_MULT_STR[m.group(2).lower()])
+        except (ValueError, OverflowError):
+            return 0
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _posted_days_ago(item: Dict[str, Any]) -> int:
     ts_raw = _pick(item, ("timestamp", "takenAtTimestamp", "taken_at_timestamp"))
     if ts_raw is None:
@@ -460,18 +482,37 @@ def _map_post(p: Dict[str, Any], idx: int, owner: str) -> Optional[Post]:
     # Instagram's xdt/GraphQL feed nodes use snake_case (like_count) and
     # legacy web nodes use edge objects (edge_media_preview_like.count).
     # All three families must be read or real engagement silently maps to 0.
-    likes = _to_int(_pick(p, (
+    likes_value = _pick(p, (
         "likesCount", "likeCount", "like_count",
         "edge_media_preview_like.count", "edge_liked_by.count",
-    )))
-    comments = _to_int(_pick(p, (
+        # modern xdt nodes expose likes only through preview edge objects
+        "preview_likes.count",
+    ))
+    likes = _to_int(likes_value)
+    # Comment counts live under different names per node family: Apify
+    # camelCase (commentsCount), web API snake_case (comment_count), legacy
+    # edges (edge_media_to_comment.count), and modern xdt feed nodes
+    # (edge_media_to_parent_comment.count / preview_comments.count). Missing
+    # any of these silently mapped REAL comments to 0.
+    comment_value = _pick(p, (
         "commentsCount", "commentCount", "comment_count",
         "edge_media_to_comment.count",
-    )))
+        "edge_media_to_parent_comment.count",
+        "preview_comments.count",
+    ))
+    comments = _to_int(comment_value)
     views = _to_int(_pick(p, (
         "videoViewCount", "playCount", "videoPlayCount",
         "video_view_count", "view_count", "ig_play_count",
     )))
+
+    # Counts sometimes arrive as strings ("1,944", "1.9K", "352K"). Parse
+    # them BEFORE the shell-item guard below — otherwise a real post with
+    # humanized counts parses as all-zero and is dropped entirely.
+    if isinstance(likes_value, str):
+        likes = _parse_count_string(likes_value)
+    if isinstance(comment_value, str):
+        comments = _parse_count_string(comment_value)
 
     # Exact ISO timestamp (kept for best-time analytics; falls back to None).
     posted_at_iso: Optional[str] = None
@@ -525,14 +566,9 @@ def _map_post(p: Dict[str, Any], idx: int, owner: str) -> Optional[Post]:
 
     hashtags = sorted({f"#{h.lower()}" for h in re.findall(r"#(\w+)", caption)})[:10]
 
-    # Distinguish "source feed omitted the comment field" (xdt/web GraphQL
-    # nodes routinely do) from "genuinely zero comments": an omitted field
-    # parses to 0 and used to masquerade as a real zero until the permalink
-    # backfill resolved it.
-    comment_value = _pick(p, (
-        "commentsCount", "commentCount", "comment_count",
-        "edge_media_to_comment.count",
-    ))
+    # "Omitted" means the source feed carried NO comment field under any of
+    # the known names (checked at the top of this function) — a backfill
+    # candidate. An explicit 0 is a genuine zero.
     comment_omitted = comment_value is None
 
     return Post(
@@ -541,7 +577,7 @@ def _map_post(p: Dict[str, Any], idx: int, owner: str) -> Optional[Post]:
         id=str(_pick(p, ("shortCode", "shortcode", "code", "id", "url"))) or f"{owner}_{idx}",
         caption=caption[:600],
         likes=likes,
-        comments=_to_int(comment_value),
+        comments=comments,
         posted_days_ago=_posted_days_ago(p),
         hashtags=hashtags,
         media_type=media_type,
@@ -952,7 +988,10 @@ def _map_direct_user(user: Dict[str, Any], requested: str) -> ProfileData:
     Reuses _map_post for the embedded latest-posts edges, so likes/comments/
     views/timestamps/media types map with the same tolerance as Apify rows."""
     username = str(user.get("username") or requested).strip().lower() or requested.lower()
-    edges = ((user.get("edge_owner_to_timeline_media") or {}).get("edges")) or []
+    media = (user.get("edge_owner_to_timeline_media")
+             or user.get("xdt_api__v1__feed__user_timeline_graphql_connection")
+             or {})
+    edges = (media.get("edges")) or []
     recent_posts = [
         p for p in (
             _map_post((e.get("node") if isinstance(e, dict) else None) or {}, i, username)
@@ -1049,18 +1088,36 @@ _CDP_PORT = int(os.getenv("IG_CDP_PORT", "9333"))
 
 def _cdp_ws_url() -> Optional[str]:
     """DevTools websocket URL of a live Chrome debuggee (launches one on a
-    fixed port when absent). Sync — call via asyncio.to_thread."""
+    fixed port when absent). Sync — call via asyncio.to_thread.
+
+    Any real page tab is acceptable, not just one already showing
+    instagram.com: _cdp_page_eval navigates the tab to the target URL
+    itself. Previously a tab stuck on chrome-error:// (or any restored
+    non-IG page) made this return None forever, silently killing the
+    strongest real-data provider."""
     import urllib.request as _uq
 
     def _targets():
         with _uq.urlopen(f"http://127.0.0.1:{_CDP_PORT}/json", timeout=3) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    def _pick_tab():
+        tabs = [t for t in _targets() if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+        # Prefer an instagram.com tab, else any page tab (e.g. one stuck on
+        # chrome-error:// — navigation will fix it).
+        for t in tabs:
+            if "instagram.com" in str(t.get("url", "")):
+                return t
+        return tabs[0] if tabs else None
+
     try:
-        for t in _targets():
-            if t.get("type") == "page" and "instagram.com" in str(t.get("url", "")):
-                return t.get("webSocketDebuggerUrl")
-        # Port not serving (or no IG tab) — (re)launch headless Chrome.
+        try:
+            hit = _pick_tab()
+            if hit:
+                return hit["webSocketDebuggerUrl"]
+        except Exception:
+            pass  # port not serving yet — fall through to launch
+        # Port not serving (or no usable tab) — (re)launch headless Chrome.
         chrome = _find_chrome()
         if not chrome:
             return None
@@ -1079,12 +1136,12 @@ def _cdp_ws_url() -> Optional[str]:
             ],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        for _ in range(30):  # wait for the DevTools endpoint + IG tab
+        for _ in range(30):  # wait for the DevTools endpoint + a usable tab
             time.sleep(1)
             try:
-                for t in _targets():
-                    if t.get("type") == "page" and "instagram.com" in str(t.get("url", "")):
-                        return t.get("webSocketDebuggerUrl")
+                hit = _pick_tab()
+                if hit:
+                    return hit["webSocketDebuggerUrl"]
             except Exception:
                 pass
         return None
@@ -1577,64 +1634,140 @@ def _extract_profile_from_dom(html: str, requested: str) -> Optional[ProfileData
 
 
 async def _fetch_graphql_profile(username: str) -> Optional[ProfileData]:
-    """GraphQL provider: run Instagram's own persisted profile query
-    (doc_id 10015901848480474) from INSIDE a real Chrome page via the
-    DevTools protocol. Same-origin fetch with the page's cookies — the
-    exact request the site's frontend makes — so Instagram serves real
-    GraphQL data instead of 401ing the HTTP-level call.
+    """GraphQL provider: harvest the profile data from the REAL GraphQL
+    responses Instagram's own web app receives while loading the profile
+    page. Captured via the Chrome DevTools protocol (Network.enable +
+    Network.getResponseBody) — no doc_id to guess or maintain, no synthetic
+    request of our own: whatever Instagram's frontend genuinely gets, we
+    read. Handles both legacy edge_owner_to_timeline_media and modern
+    xdt_api__v1__feed__user_timeline_graphql_connection shapes.
 
     Returns None (caller falls through to other providers) when Chrome/
-    websockets are unavailable or the query doesn't return a user."""
+    websockets are unavailable or no profile payload was captured."""
     if os.getenv("IG_GQL_BROWSER", "true").lower() not in ("1", "true", "yes"):
         return None
-    js = """
-(async () => {
-  try {
-    const lsd = (document.documentElement.innerHTML.split('"LSD",[],{"token":"')[1] || '').split('"')[0];
-    const vars = JSON.stringify({username: %s});
-    const body = new URLSearchParams({variables: vars, doc_id: %s, lsd: lsd});
-    const r = await fetch('/graphql/query', {
-      method: 'POST',
-      credentials: 'include',
-      headers: {'content-type': 'application/x-www-form-urlencoded',
-                'x-ig-app-id': '%s',
-                'x-fb-lsd': lsd,
-                'x-requested-with': 'XMLHttpRequest'},
-      body: body.toString(),
-    });
-    return JSON.stringify({status: r.status, body: await r.text()});
-  } catch (e) {
-    return JSON.stringify({status: 0, error: String(e)});
-  }
-})()
-""" % (
-        json.dumps(username),
-        json.dumps("10015901848480474"),
-        IG_WEB_APP_ID,
-    )
-    raw = await _cdp_page_eval(
-        js,
-        f"https://www.instagram.com/{username}/",
-        settle_ms=3500,
-    )
-    if not raw:
-        return None
     try:
-        outer = json.loads(raw)
-        status = int(outer.get("status") or 0)
-        body = outer.get("body") or ""
-        if status != 200 or not body:
-            return None
-        payload = json.loads(body)
+        import websockets
     except Exception:
         return None
-    user = ((payload or {}).get("data") or {}).get("user")
-    if not isinstance(user, dict) or not user:
+    ws_url = await asyncio.to_thread(_cdp_ws_url)
+    if not ws_url:
         return None
-    profile = _map_direct_user(user, username)
-    if profile.followers == 0 and not profile.recent_posts:
+
+    async def _rpc(ws, mid, method, params=None):
+        await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg.get("id") == mid:
+                return msg
+
+    async def _drain_until(ws, deadline, want):
+        """Read websocket frames until a Network.responseReceived for a
+        GraphQL/profile URL arrives or the deadline passes. Returns the
+        requestId of the matched response, else None."""
+        while time.monotonic() < deadline:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                return None
+            except Exception:
+                return None
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            params = msg.get("params") or {}
+            resp = params.get("response") or {}
+            url = str(resp.get("url") or "")
+            if not any(w in url for w in want):
+                continue
+            return params.get("requestId")
         return None
-    return profile
+
+    url = f"https://www.instagram.com/{username}/"
+    # Instagram's web app calls /api/graphql (POST) for profile data. Match
+    # any graphql-ish URL — endpoint names drift, the shape does not.
+    want = ("graphql", "web_profile_info", "feed/user")
+
+    def _user_from_payload(payload):
+        """Extract the profile user object from a captured response body."""
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        user = data.get("user") if isinstance(data, dict) else None
+        if isinstance(user, dict) and (user.get("username") or user.get("id")):
+            return user
+        return None
+
+    try:
+        async with websockets.connect(ws_url, max_size=256 * 1024 * 1024) as ws:
+            await _rpc(ws, 1, "Runtime.enable")
+            await _rpc(ws, 2, "Network.enable", {"maxPostDataSize": 65536})
+            # Fresh navigation so the page's own data requests happen now,
+            # inside our capture window.
+            await _rpc(ws, 3, "Page.navigate", {"url": url})
+            # Collect ALL graphql-ish responses in the window, scanning each
+            # body as it arrives. If Instagram answers with its logged-out
+            # rejection, bail fast — waiting longer cannot help.
+            deadline = time.monotonic() + 15
+            candidate_ids: list = []
+            unauthorized_bodies = 0
+            profile = None
+            while time.monotonic() < deadline and profile is None:
+                try:
+                    raw = await asyncio.wait_for(
+                        ws.recv(), timeout=max(0.1, deadline - time.monotonic())
+                    )
+                except asyncio.TimeoutError:
+                    break
+                except Exception:
+                    break
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                if msg.get("method") != "Network.responseReceived":
+                    continue
+                params = msg.get("params") or {}
+                resp = params.get("response") or {}
+                if not any(w in str(resp.get("url") or "") for w in want):
+                    continue
+                req_id = params.get("requestId")
+                try:
+                    body_msg = await _rpc(ws, 100 + len(candidate_ids), "Network.getResponseBody", {"requestId": req_id})
+                except Exception:
+                    continue
+                body = (body_msg.get("result") or {}).get("body") or ""
+                if not body:
+                    continue
+                if "Unauthorized logged out query" in body or "login_required" in body:
+                    unauthorized_bodies += 1
+                    if unauthorized_bodies >= 2:
+                        break  # logged-out GraphQL is blocked — abort early
+                    continue
+                candidate_ids.append(req_id)
+                payload = None
+                try:
+                    payload = json.loads(body)
+                except Exception:
+                    for chunk in body.split("\n"):
+                        chunk = chunk.strip()
+                        if chunk.startswith("{"):
+                            try:
+                                payload = json.loads(chunk)
+                                break
+                            except Exception:
+                                continue
+                user = _user_from_payload(payload)
+                if user is not None:
+                    profile = _map_direct_user(user, username)
+            if profile is None:
+                return None
+            if profile.followers == 0 and not profile.recent_posts:
+                return None
+            return profile
+    except Exception:
+        return None
 
 
 async def _fetch_direct_profile(username: str) -> ProfileData:
@@ -2435,27 +2568,27 @@ async def get_profile(username: str) -> ProfileData:
                 _profile_cache[username] = (time.monotonic(), profile)
             return profile
 
-    # Provider #2 — keyless direct fetch (web_profile_info). Reached when
-    # live mode has NO Apify tokens, or when the pool run just failed.
-    # Needs zero credentials for public profiles, so unknown handles no
-    # longer get fake numbers just because Apify credits ran out.
+    # Provider #2 — keyless direct fetch (Chrome-rendered page + HTTP
+    # fallbacks). Reached when live mode has NO Apify tokens, or when the
+    # pool run just failed (e.g. monthly credit exhausted). Needs zero
+    # credentials for public profiles, so unknown handles no longer get fake
+    # numbers just because Apify credits ran out.
     if DATA_MODE == "live" and DIRECT_FETCH_ENABLED:
-        # Provider #2a — GraphQL executed INSIDE a real Chrome page (same
-        # origin/cookies as instagram.com's own frontend, so the API that
-        # 401s every HTTP client serves real data here). Preferred over the
-        # HTTP endpoints; falls through on any failure.
-        gql_profile = await _fetch_graphql_profile(username)
-        if gql_profile is not None:
-            gql_profile = await _backfill_missing_likes(gql_profile)
-            await asyncio.to_thread(_disk_profile_set, username, gql_profile)
-            async with _CACHE_LOCK:
-                _profile_cache[username] = (time.monotonic(), gql_profile)
-            return gql_profile
         try:
             profile = await _fetch_direct_profile(username)
         except ValueError:
             raise  # handle genuinely doesn't exist — honest error
         except (RuntimeError, httpx.HTTPError):
+            # Every HTTP-level path was blocked — one last real-data attempt:
+            # capture the page's own network responses (bounded ~15s; aborts
+            # fast when Instagram rejects logged-out GraphQL).
+            gql_profile = await _fetch_graphql_profile(username)
+            if gql_profile is not None:
+                gql_profile = await _backfill_missing_likes(gql_profile)
+                await asyncio.to_thread(_disk_profile_set, username, gql_profile)
+                async with _CACHE_LOCK:
+                    _profile_cache[username] = (time.monotonic(), gql_profile)
+                return gql_profile
             if FALLBACK_TO_DEMO:
                 pass  # fall through to stale/demo handling below
             else:
