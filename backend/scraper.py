@@ -193,7 +193,7 @@ _CACHE_DB = os.getenv("PROFILE_CACHE_DB", os.path.join(os.path.dirname(__file__)
 # DATA content of cached rows. Rows written by an older pipeline version are
 # ignored (treated as expired), so pre-fix snapshots with broken comment
 # counts are never served again — a fresh real fetch happens instead.
-_CACHE_SCHEMA_VERSION = int(os.getenv("PROFILE_CACHE_SCHEMA", "2"))
+_CACHE_SCHEMA_VERSION = int(os.getenv("PROFILE_CACHE_SCHEMA", "3"))
 
 _DISK_TTL_PROFILE = int(os.getenv("PROFILE_DISK_TTL", str(7 * 86400)))   # fresh enough for metrics
 _DISK_TTL_DISCOVERY = int(os.getenv("DISCOVERY_DISK_TTL", str(24 * 3600)))  # competitor lists drift slowly
@@ -238,6 +238,14 @@ def _cache_set(key: str, value: Any) -> None:
 def _profile_to_json(p: ProfileData) -> dict:
     d = p.model_dump()
     d["cache_schema"] = _CACHE_SCHEMA_VERSION
+    # Remember how wide the sample was when this row was written: if the
+    # configured sample grows, cached rows with a narrower sample are
+    # re-fetched so the comment average always reflects the intended width.
+    try:
+        d["sample_size_cached"] = len(d.get("recent_posts") or [])
+        d["sample_width_cached"] = int(os.getenv("IG_PERMALINK_POSTS", "12"))
+    except Exception:
+        pass
     for post in d["recent_posts"]:
         for k in ("likes", "comments", "views", "posted_days_ago"):
             post[k] = int(post.get(k) or 0)
@@ -253,6 +261,17 @@ def _profile_from_json(d: dict) -> ProfileData:
     # them as fresh data — the caller re-fetches instead.
     if int(d.get("cache_schema") or 0) < _CACHE_SCHEMA_VERSION:
         raise ValueError("stale cache schema")
+    # A row written when the configured sample width was smaller (e.g. the
+    # old 6-item sample) under-samples comment data — refuse it so a fresh
+    # full-width fetch replaces it. Rows written by providers that simply
+    # RETURN fewer posts are fine: the stamp records the configured width
+    # at write time, not the actual post count.
+    try:
+        written_width = int(d.get("sample_width_cached") or 0)
+    except Exception:
+        written_width = 0
+    if written_width < int(os.getenv("IG_PERMALINK_POSTS", "12")):
+        raise ValueError("stale narrow sample")
     d["recent_posts"] = d.get("recent_posts") or []
     return ProfileData(**d)
 
@@ -1063,17 +1082,28 @@ def _find_chrome() -> Optional[str]:
 def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
     """Render a page in headless Chrome and return the final DOM (sync).
     Chrome's real browser fingerprint gets past Instagram's static-HTML
-    login-wall where plain HTTP clients only receive an error shell."""
+    login-wall where plain HTTP clients only receive an error shell.
+
+    Each render gets its OWN throwaway user-data-dir. A shared dir made
+    concurrent renders collide on Chrome's singleton profile lock: the
+    losing launch exits non-zero and its post silently disappeared —
+    taking its real like/comment counts with it (short samples, broken
+    comment averages). The dir is cleaned up after the dump."""
     chrome = _find_chrome()
     if not chrome:
         return None
     import subprocess
+    import tempfile
+    import shutil as _sh
+    profile_dir = None
     try:
+        profile_dir = tempfile.mkdtemp(prefix="ig-render-")
         cmd = [
             chrome, "--headless=new", "--disable-gpu", "--no-first-run",
             "--no-default-browser-check", "--window-size=1280,2400",
             f"--user-agent={_DIRECT_HEADERS['user-agent']}",
             f"--virtual-time-budget={budget_ms}", "--dump-dom", url,
+            f"--user-data-dir={profile_dir}",
         ]
         proc = subprocess.run(cmd, capture_output=True, timeout=45)
         if proc.returncode != 0:
@@ -1082,6 +1112,9 @@ def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
         return dom or None
     except (subprocess.TimeoutExpired, OSError):
         return None
+    finally:
+        if profile_dir:
+            _sh.rmtree(profile_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
