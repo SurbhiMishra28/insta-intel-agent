@@ -82,61 +82,10 @@ function HashtagResearchView({ hashtags }) {
   );
 }
 
-function HistoryView({ history }) {
-  if (!history || history.length === 0) {
-    return (
-      <p style={{ fontSize: 12.5, color: 'var(--paper-dim)' }}>
-        No scan history yet — every analysis is recorded, so re-scan this account
-        later to see follower and engagement trends here.
-      </p>
-    );
-  }
-  const latest = history[history.length - 1];
-  const maxF = Math.max(...history.map((h) => h.followers)) || 1;
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 12 }}>
-        <div className="stat">
-          <div className="num" style={{ fontSize: 20 }}>
-            {latest.followers_delta > 0 ? `+${latest.followers_delta.toLocaleString()}` : latest.followers_delta.toLocaleString()}
-          </div>
-          <div className="label">Followers since previous scan</div>
-        </div>
-        <div className="stat">
-          <div className="num" style={{ fontSize: 20 }}>
-            {latest.er_delta > 0 ? `+${latest.er_delta}` : latest.er_delta}%
-          </div>
-          <div className="label">Engagement rate change</div>
-        </div>
-        <div className="stat">
-          <div className="num" style={{ fontSize: 20 }}>{history.length}</div>
-          <div className="label">Total scans recorded</div>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 70, maxWidth: 480 }}>
-        {history.map((h, i) => (
-          <div key={i} style={{ flex: 1, textAlign: 'center' }} title={`${h.scanned_at}: ${h.followers.toLocaleString()} followers, ER ${h.engagement_rate}%`}>
-            <div style={{
-              height: `${Math.max(6, (h.followers / maxF) * 60)}px`,
-              background: i === history.length - 1 ? 'var(--signal)' : 'var(--signal-dim)',
-              borderRadius: 2,
-            }} />
-            <div style={{ fontSize: 9.5, color: 'var(--paper-dim)', marginTop: 3 }}>
-              {new Date(h.scanned_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 import ReelTimingView from './ReelTiming.jsx';
 import HashtagSuggestionView from './HashtagSuggestion.jsx';
 
-export default function ExtrasGrid({ bio, hashtags, history, reelTiming, hashtagSuggestions }) {
+export default function ExtrasGrid({ bio, hashtags, reelTiming, hashtagSuggestions }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 28 }}>
       {bio && (
@@ -151,10 +100,6 @@ export default function ExtrasGrid({ bio, hashtags, history, reelTiming, hashtag
           <HashtagResearchView hashtags={hashtags} />
         </div>
       )}
-      <div>
-        <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, margin: '0 0 10px' }}>Growth tracking</h3>
-        <HistoryView history={history} />
-      </div>
     </div>
   );
 }

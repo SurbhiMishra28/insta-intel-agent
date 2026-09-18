@@ -142,14 +142,16 @@ def get_history(username: str) -> Tuple[List[ScanRecord], Optional[ScanRecord]]:
 # Growth tracking — compare an account NOW against its stored past
 # ---------------------------------------------------------------------------
 
-def get_growth_comparison(username: str) -> dict:
-    """Build a growth comparison for one handle entirely from stored scans.
+def get_daily_snapshots(username: str) -> List[dict]:
+    """Collapse one handle's raw scan rows into one snapshot per day.
 
-    Baselines: previous scan (last two recorded searches), 1 week ago and
-    1 month ago (nearest stored scan within a ±3-day tolerance window so a
-    weekly/monthly ritual keeps working even if a scan is a day or two off).
-    Every number is a real recorded measurement — when a baseline is missing
-    the response says so honestly instead of inventing data.
+    Repeated analyses of the same handle within a single day (re-analyze
+    clicks, auto-discovery refetches, chat grounding) record one raw row
+    each. Growth is a day-scale story, so all of a day's scans collapse to
+    ONE snapshot: the LAST scan of the day (most complete: Instagram's own
+    counts at that moment, plus posts_count/avg_comments may only exist on
+    later rows). Raw rows stay untouched — every real measurement survives;
+    this is a read-time view for the tracker.
     """
     uname = (username or "").strip().lstrip("@").lower()
     try:
@@ -161,111 +163,145 @@ def get_growth_comparison(username: str) -> dict:
                 (uname,),
             ).fetchall()
     except Exception:
-        rows = []
+        return []
 
-    if len(rows) < 2:
+    buckets: dict = {}
+    for ts, f, er, al, cad, pc, ac in rows:
+        try:
+            t = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            continue  # unparseable timestamp — never let one bad row kill the view
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        day = t.date().isoformat()
+        bucket = buckets.get(day)
+        if bucket is None:
+            buckets[day] = {
+                "day": day,
+                "scanned_at": ts,
+                "scan_count": 1,
+                "followers": f, "engagement_rate": er, "avg_likes": al,
+                "posting_frequency_per_week": cad,
+                "posts_count": pc, "avg_comments": ac,
+            }
+        else:
+            bucket["scan_count"] += 1
+            # Last scan of the day wins (rows arrive in ascending time order).
+            bucket["scanned_at"] = ts
+            bucket["followers"] = f
+            bucket["engagement_rate"] = er
+            bucket["avg_likes"] = al
+            bucket["posting_frequency_per_week"] = cad
+            # Optional columns may be NULL on early rows: keep the first
+            # non-NULL value ever seen for the day.
+            if bucket["posts_count"] is None:
+                bucket["posts_count"] = pc
+            if bucket["avg_comments"] is None:
+                bucket["avg_comments"] = ac
+    return [buckets[d] for d in sorted(buckets)]
+
+
+def get_growth_comparison(username: str) -> dict:
+    """Growth comparison for one handle, computed over DAILY SNAPSHOTS.
+
+    Baselines are snapshot-to-snapshot: yesterday's snapshot (the previous
+    DAY — a same-day burst of re-analyses can never make every delta read
+    ±0), plus the nearest snapshots to 7 and 30 days back. When a baseline
+    is missing the response says so honestly instead of inventing data.
+    """
+    snaps = get_daily_snapshots(username)
+
+    if len(snaps) < 2:
+        only = snaps[0] if snaps else None
         return {
-            "username": uname,
+            "username": (username or "").strip().lstrip("@").lower(),
             "enough_history": False,
-            "scan_count": len(rows),
-            "first_scan": rows[0][0] if rows else None,
-            "latest": None,
+            "scan_count": only["scan_count"] if only else 0,
+            "snapshot_count": len(snaps),
+            "first_scan": only["scanned_at"] if only else None,
+            "latest": only,
             "baselines": [],
+            "series": [],
             "verdict": (
-                "Growth tracking starts from this account's first scan. "
-                "Analyze this handle again later (a week or a month from now) "
-                "and every new scan will be compared against today's stored data "
-                "— followers, engagement and posting pace."
+                "Growth tracking compares one day against another. Every scan "
+                "of this handle so far is from a single day, so there is "
+                "nothing to compare yet — analyze it again tomorrow (or any "
+                "later day) and this section will show exactly what changed "
+                "against today's stored numbers."
             ),
         }
 
-    def _row(r):
-        return {
-            "scanned_at": r[0], "followers": r[1], "engagement_rate": r[2],
-            "avg_likes": r[3], "posting_frequency_per_week": r[4],
-            "posts_count": r[5], "avg_comments": r[6],
-        }
+    latest = snaps[-1]
 
-    latest = _row(rows[-1])
-    now = datetime.now(timezone.utc)
+    def _parse(ts: str):
+        try:
+            t = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            return None
+        return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
-    # Scan exactly one step back — the most honest "since last search" delta.
-    prev = _row(rows[-2])
-
-    # Nearest scan within ±3 days of the target age (week/month ago).
-    def _nearest(days: int):
-        target = now - timedelta(days=days)
+    def _nearest(days: int, tol_days: float = 2.0):
+        # Nearest snapshot aged within [days-tol, days+tol] — for "1 week
+        # ago" a 9-day-old snapshot beats a 5-day-old one, so only the
+        # older side of the window is considered.
         best, best_gap = None, None
-        for r in rows[:-1]:  # baselines must be strictly older than latest
-            try:
-                t = datetime.fromisoformat(r[0])
-            except Exception:
+        for s in snaps[:-1]:
+            t = _parse(s["scanned_at"])
+            if t is None:
                 continue
-            if t.tzinfo is None:
-                # stored naive — treat as UTC
-                t = t.replace(tzinfo=timezone.utc)
-            gap = abs((t - target).total_seconds())
+            age = (datetime.now(timezone.utc) - t).total_seconds() / 86400
+            if age < days - tol_days or age > days + tol_days:
+                continue
+            gap = abs(age - days)
             if best_gap is None or gap < best_gap:
-                best, best_gap = r, gap
-        if best is not None and best_gap <= 3 * 86400:
-            return _row(best)
-        return None
-
-    week = _nearest(7)
-    month = _nearest(30)
+                best, best_gap = s, gap
+        return best
 
     def _delta(cur, base, key):
-        if cur is None or base is None:
-            return None
         try:
-            return round(cur[key] - base[key], 4)
+            a, b = cur.get(key), base.get(key)
+            if a is None or b is None:
+                return None
+            return round(a - b, 4)
         except (TypeError, KeyError):
-        # posts_count/avg_comments may be NULL on pre-migration rows
-            return None
+            return None  # posts_count/avg_comments may be NULL on old rows
 
     baselines = []
-    for label, base, days in (("last scan", prev, None), ("1 week ago", week, 7), ("1 month ago", month, 30)):
+    for label, base, days in (
+        ("previous day", _nearest(1), 1),
+        ("1 week ago", _nearest(7), 7),
+        ("1 month ago", _nearest(30), 30),
+    ):
         if base is None:
-            baselines.append({"label": label, "available": False,
-                              "days_back": days,
-                              "note": "no stored scan near this date"})
+            baselines.append({
+                "label": label, "available": False, "days_back": days,
+                "note": "no stored scan near this date",
+            })
             continue
-        d_followers = _delta(latest, base, "followers")
-        d_er = _delta(latest, base, "engagement_rate")
-        d_likes = _delta(latest, base, "avg_likes")
-        d_comments = _delta(latest, base, "avg_comments")
-        d_posts = _delta(latest, base, "posts_count")
-        d_cadence = _delta(latest, base, "posting_frequency_per_week")
-        span_days = None
-        try:
-            span_days = round((datetime.fromisoformat(latest["scanned_at"]) -
-                               datetime.fromisoformat(base["scanned_at"])).total_seconds() / 86400, 1)
-        except Exception:
-            pass
+        d = {k: _delta(latest, base, k) for k in (
+            "followers", "engagement_rate", "avg_likes", "avg_comments",
+            "posts_count", "posting_frequency_per_week",
+        )}
+        bt, lt = _parse(base["scanned_at"]), _parse(latest["scanned_at"])
+        span_days = round((lt - bt).total_seconds() / 86400, 1) if bt and lt else None
         baselines.append({
             "label": label,
             "available": True,
             "days_back": days,
             "scanned_at": base["scanned_at"],
             "span_days": span_days,
-            "values": {
-                "followers": base["followers"], "engagement_rate": base["engagement_rate"],
-                "avg_likes": base["avg_likes"], "avg_comments": base["avg_comments"],
-                "posts_count": base["posts_count"],
-                "posting_frequency_per_week": base["posting_frequency_per_week"],
-            },
-            "deltas": {
-                "followers": d_followers, "engagement_rate": d_er, "avg_likes": d_likes,
-                "avg_comments": d_comments, "posts_count": d_posts,
-                "posting_frequency_per_week": d_cadence,
-            },
+            "values": {k: base.get(k) for k in (
+                "followers", "engagement_rate", "avg_likes", "avg_comments",
+                "posts_count", "posting_frequency_per_week",
+            )},
+            "deltas": d,
             "followers_delta_pct": (
-                round(d_followers / base["followers"] * 100, 3)
-                if d_followers is not None and base["followers"] else None
+                round(d["followers"] / base["followers"] * 100, 3)
+                if d["followers"] is not None and base.get("followers") else None
             ),
         })
 
-    # Plain-language verdict from the strongest available baseline (month > week > last scan).
+    # Plain-language verdict from the strongest available baseline (month > week > yesterday).
     verdict_parts = []
     chosen = next((b for b in reversed(baselines) if b["available"]), None)
     if chosen:
@@ -292,14 +328,40 @@ def get_growth_comparison(username: str) -> dict:
                else "No measurable change against the stored baseline yet.")
 
     return {
-        "username": uname,
+        "username": (username or "").strip().lstrip("@").lower(),
         "enough_history": True,
-        "scan_count": len(rows),
-        "first_scan": rows[0][0],
+        "scan_count": sum(s["scan_count"] for s in snaps),
+        "snapshot_count": len(snaps),
+        "first_scan": snaps[0]["scanned_at"],
         "latest": latest,
         "baselines": baselines,
+        "series": get_growth_series(username),
         "verdict": verdict,
     }
+
+
+def get_growth_series(username: str, max_points: int = 30) -> List[dict]:
+    """Day-scale trend series (oldest → newest) for the growth chart: one
+    point per daily snapshot with its day-over-day follower delta."""
+    snaps = get_daily_snapshots(username)[-max_points:]
+    series: List[dict] = []
+    for i, s in enumerate(snaps):
+        prev = snaps[i - 1] if i > 0 else None
+        df = None
+        if prev is not None and s.get("followers") is not None and prev.get("followers") is not None:
+            df = s["followers"] - prev["followers"]
+        series.append({
+            "day": s["day"],
+            "scanned_at": s["scanned_at"],
+            "followers": s["followers"],
+            "engagement_rate": s["engagement_rate"],
+            "avg_likes": s["avg_likes"],
+            "avg_comments": s["avg_comments"],
+            "posting_frequency_per_week": s["posting_frequency_per_week"],
+            "followers_delta": df,
+            "scan_count": s["scan_count"],
+        })
+    return series
 
 
 # ---------------------------------------------------------------------------

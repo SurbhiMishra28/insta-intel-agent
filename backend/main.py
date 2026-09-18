@@ -1,6 +1,17 @@
 import os
 import asyncio
+import sys as _sys
 from concurrent.futures import ThreadPoolExecutor
+
+# Windows consoles default to a cp1252 stream that cannot encode characters
+# common in Instagram content (U+202F etc.) — a failing diagnostic print must
+# never take down a request.
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from fastapi import FastAPI, HTTPException, Query, Response
 from types import SimpleNamespace
 from fastapi.middleware.cors import CORSMiddleware
@@ -221,9 +232,9 @@ def _render_history_data_html(profile, metrics, records, source) -> str:
 
     scan_rows = "".join(
         f"<tr><td>{_esc(str(r.scanned_at)[:19].replace('T', ' '))}</td>"
-        f"<td>{r.followers:,}</td><td>{r.engagement_rate}%</td>"
+        f"<td>{_km(r.followers)}</td><td>{r.engagement_rate}%</td>"
         f"<td>{r.avg_likes:,.0f}</td><td>{r.posting_frequency_per_week}</td>"
-        f"<td>{('+' if r.followers_delta > 0 else '') + f'{r.followers_delta:,}'}</td></tr>"
+        f"<td>{('+' if r.followers_delta > 0 else '') + _km(r.followers_delta)}</td></tr>"
         for r in records
     )
 
@@ -265,7 +276,7 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
   <p class="tag">InstaIQ · Stored account data · restored from the agent's search history · {now}</p>
   <p class="muted">{_esc(p.bio or '')}</p>
   <div class="stats">
-    <div class="stat"><b>{p.followers:,}</b><span>Followers</span></div>
+    <div class="stat"><b>{_km(p.followers)}</b><span>Followers</span></div>
     <div class="stat"><b>{p.following:,}</b><span>Following</span></div>
     <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
     <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
@@ -372,6 +383,9 @@ def growth_tracking(username: str = Query(...)):
     comparison = storage.get_growth_comparison(uname)
     records, _previous = storage.get_history(uname)
     comparison["history"] = records
+    # Day-scale snapshots (same-day re-analyses collapsed) — what the growth
+    # chart and history rows render; raw rows above stay for full detail.
+    comparison["snapshots"] = storage.get_daily_snapshots(uname)
     return comparison
 
 
@@ -751,7 +765,7 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
                 summary=(
                     f"Suggested tiers seeded from the account's own tags: {', '.join('#' + s for s in seed_tags[:3])}. "
                     f"Mix ~60% rare (small, winnable), ~30% mid, ~10% broad - rare tags are "
-                    f"where a {main_insight.profile.followers:,}-follower account can actually rank."
+                    f"where a {_km(main_insight.profile.followers)}-follower account can actually rank."
                 ),
                 tiered=tiered[:15],
                 recommended_sets=[
@@ -855,6 +869,25 @@ def _esc(v) -> str:
     return _html.escape(str(v)) if v is not None else ""
 
 
+def _km(n) -> str:
+    """Compact K/M/B rendering for big counts in reports/explainers:
+    680000000 -> '680M', 291000 -> '291K'. Small/decimal values untouched
+    (avg comments 0.2 must never become '0M')."""
+    try:
+        x = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    neg = x < 0
+    v = abs(x)
+    for div, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if v >= div:
+            s = f"{v / div:.2f}".rstrip("0").rstrip(".")
+            return ("-" if neg else "") + s + suffix
+    if v == int(v):
+        return str(int(x))
+    return f"{x:g}"
+
+
 def _render_report_html(d: GrowthPlanResponse) -> str:
     """Build the printable HTML report from the same response object the UI
     consumes. Light theme (print-friendly); every number comes straight from
@@ -901,7 +934,7 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
   <p class="tag">InstaIQ · AI Instagram Growth Report · generated {__import__('datetime').datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
   <p class="muted">{_esc(p.bio or '')}</p>
   <div class="stats">
-    <div class="stat"><b>{p.followers:,}</b><span>Followers</span></div>
+    <div class="stat"><b>{_km(p.followers)}</b><span>Followers</span></div>
     <div class="stat"><b>{p.posts_count:,}</b><span>Posts</span></div>
     <div class="stat"><b>{m.engagement_rate}%</b><span>Engagement rate</span></div>
     <div class="stat"><b>{m.avg_likes:,.0f}</b><span>Avg likes / post</span></div>
@@ -1052,7 +1085,7 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
     if d.history:
         parts.append('<h2>Scan history</h2><table><tr><th>Date (UTC)</th><th>Followers</th><th>ER %</th><th>Avg likes</th><th>Posts/wk</th></tr>')
         for h in d.history[-8:]:
-            parts.append(f'<tr><td>{_esc(str(h.scanned_at)[:16]).replace("T", " ")}</td><td>{h.followers:,}</td>'
+            parts.append(f'<tr><td>{_esc(str(h.scanned_at)[:16]).replace("T", " ")}</td><td>{_km(h.followers)}</td>'
                          f'<td>{h.engagement_rate}</td><td>{h.avg_likes:,.0f}</td><td>{h.posting_frequency_per_week}</td></tr>')
         parts.append('</table>')
 
@@ -1400,7 +1433,7 @@ async def chat(req: ChatRequest):
             )[:3]
             live = {
                 "account": f"@{profile.username}",
-                "followers": f"{profile.followers:,}",
+                "followers": _km(profile.followers),
                 "engagement rate": f"{metrics.engagement_rate}%",
                 "avg likes/post": f"{metrics.avg_likes:,.0f}",
                 "avg comments/post": f"{metrics.avg_comments:,.1f}",
@@ -1418,7 +1451,7 @@ async def chat(req: ChatRequest):
         except Exception as e:
             live_err = f"I couldn't fetch live data for @{handle} — {str(e)[:120]}. The provider may be rate-limited or the account may not exist."
 
-    llm = ai_engine._get_llm()
+    llm = ai_engine._get_llm() if ai_engine._llm_available() else None
 
     if llm is not None:
         try:
@@ -1448,8 +1481,8 @@ async def chat(req: ChatRequest):
                 lambda: chain.invoke({"context": ctx_text or "(no account data)", "message": req.message}),
             )
             return ChatResponse(answer=str(answer.content or answer), context_used=bool(req.context or live))
-        except Exception:
-            pass
+        except Exception as e:
+            ai_engine._llm_trip_breaker(f"chat chain failed: {str(e)[:80]}")
 
     # Fallback: rule-based responder using live and/or insight data if available.
     answer = _rule_based_chat(req.message, req.context, live, live_err)

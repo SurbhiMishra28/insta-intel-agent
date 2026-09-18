@@ -1718,6 +1718,7 @@ textarea:focus-visible {
   color: var(--paper-dim);
   margin: 18px 0 8px;
 }
+.gt-chart { margin-bottom: 4px; }
 .gt-history {
   border: 1px solid var(--hairline);
   border-radius: 10px;
@@ -2038,3 +2039,197 @@ textarea:focus-visible {
 }
 
 .hist-del.no:hover { color: var(--paper); }
+
+
+/* ============================================================
+   Design system v3 — color identity, breathing room, polish
+   Each dashboard section gets its own accent color so users can
+   navigate by color as well as by name. Appended last so it wins
+   the cascade cleanly.
+   ============================================================ */
+
+:root {
+  --acc-amber: #FFB454;
+  --acc-cyan: #4EC9FF;
+}
+
+/* ---------- Canvas: soft color glows behind the dark UI ---------- */
+
+body {
+  background:
+    radial-gradient(1000px 520px at 10% -6%, rgba(198, 255, 78, 0.07), transparent 60%),
+    radial-gradient(1100px 600px at 108% 14%, rgba(157, 123, 255, 0.08), transparent 62%),
+    radial-gradient(900px 540px at 50% 118%, rgba(78, 201, 255, 0.055), transparent 60%),
+    var(--ink);
+  background-attachment: fixed;
+}
+
+/* ---------- Even more room to breathe ---------- */
+
+.app-shell {
+  max-width: 1320px;
+  padding-bottom: 140px;
+}
+
+.section { padding: clamp(56px, 8vw, 96px) 0; }
+
+.dash-hero {
+  gap: clamp(32px, 4.5vw, 64px);
+  padding: clamp(40px, 5vw, 64px) clamp(28px, 4vw, 56px);
+}
+
+.grid-2 { gap: var(--s-6); }
+
+.dash-stats .num { font-size: clamp(26px, 2.8vw, 36px); }
+
+/* ---------- Section labels: numbered, color-coded ---------- */
+
+.section-label {
+  font-weight: 600;
+  letter-spacing: 0.16em;
+}
+
+.section-label::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: currentColor;
+  box-shadow: 0 0 12px currentColor;
+  flex: none;
+}
+
+/* Accent-tinted hairline after the label */
+.section[data-accent='violet'] > .section-label { color: var(--acc-violet); }
+.section[data-accent='green'] > .section-label  { color: var(--acc-green); }
+.section[data-accent='amber'] > .section-label  { color: var(--acc-amber); }
+.section[data-accent='cyan'] > .section-label   { color: var(--acc-cyan); }
+.section[data-accent='rose'] > .section-label   { color: var(--acc-rose); }
+
+.section[data-accent='violet'] > .section-label::after { background: linear-gradient(90deg, rgba(157,123,255,.45), transparent); }
+.section[data-accent='green'] > .section-label::after  { background: linear-gradient(90deg, rgba(74,222,156,.45), transparent); }
+.section[data-accent='amber'] > .section-label::after  { background: linear-gradient(90deg, rgba(255,180,84,.45), transparent); }
+.section[data-accent='cyan'] > .section-label::after   { background: linear-gradient(90deg, rgba(78,201,255,.45), transparent); }
+.section[data-accent='rose'] > .section-label::after   { background: linear-gradient(90deg, rgba(255,92,138,.45), transparent); }
+
+/* Deep-dive cards pick up their section's accent on hover */
+.section[data-accent='violet'] .deep-card:hover:not(:disabled) {
+  border-color: var(--acc-violet); box-shadow: 0 6px 24px rgba(157, 123, 255, 0.18);
+}
+.section[data-accent='green'] .deep-card:hover:not(:disabled) {
+  border-color: var(--acc-green); box-shadow: 0 6px 24px rgba(74, 222, 156, 0.18);
+}
+.section[data-accent='rose'] .deep-card:hover:not(:disabled) {
+  border-color: var(--acc-rose); box-shadow: 0 6px 24px rgba(255, 92, 138, 0.18);
+}
+
+/* ---------- Metric stats: rainbow left rules for scannability ---------- */
+
+.dash-stats .stat:nth-child(5n + 1), .stat-grid .stat:nth-child(5n + 1) { border-left-color: var(--signal); }
+.dash-stats .stat:nth-child(5n + 2), .stat-grid .stat:nth-child(5n + 2) { border-left-color: var(--acc-cyan); }
+.dash-stats .stat:nth-child(5n + 3), .stat-grid .stat:nth-child(5n + 3) { border-left-color: var(--acc-violet); }
+.dash-stats .stat:nth-child(5n + 4), .stat-grid .stat:nth-child(5n + 4) { border-left-color: var(--acc-amber); }
+.dash-stats .stat:nth-child(5n + 5), .stat-grid .stat:nth-child(5n + 5) { border-left-color: var(--acc-rose); }
+
+/* ---------- Hero: gradient rule instead of a plain hairline ---------- */
+
+.hero { border-bottom: none; }
+
+.hero::after {
+  content: '';
+  display: block;
+  height: 1.5px;
+  margin-top: clamp(36px, 6vw, 56px);
+  background: linear-gradient(90deg, var(--signal), var(--acc-cyan) 35%, var(--acc-violet) 68%, transparent);
+  opacity: 0.55;
+  border-radius: 2px;
+}
+
+/* ---------- Nav: glassy pill bar with lit hover states ---------- */
+
+.dash-nav {
+  padding: 9px 12px;
+  gap: 4px;
+  background: rgba(21, 23, 26, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.dash-nav button {
+  font-weight: 500;
+  color: var(--paper-dim);
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.dash-nav button:hover {
+  color: var(--paper);
+  background: rgba(198, 255, 78, 0.09);
+}
+
+/* ---------- Buttons: glow + lift ---------- */
+
+.scanner-submit {
+  box-shadow: 0 0 0 1px rgba(198, 255, 78, 0.25), var(--shadow-signal);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+
+.scanner-submit:hover:not(:disabled) {
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px rgba(198, 255, 78, 0.35), 0 10px 32px rgba(198, 255, 78, 0.3);
+}
+
+.pdf-btn {
+  color: var(--acc-cyan);
+  border-color: rgba(78, 201, 255, 0.35);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pdf-btn:hover:not(:disabled) {
+  background: rgba(78, 201, 255, 0.1);
+  border-color: var(--acc-cyan);
+}
+
+/* ---------- Readability pass ---------- */
+
+.muted { line-height: 1.7; }
+
+.report-summary { line-height: 1.8; }
+
+.rec-list li { line-height: 1.7; }
+
+/* Zebra stripes make dense tables scannable */
+
+section table tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+/* ---------- Cards & chips: soft depth ---------- */
+
+.gt-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  border-radius: var(--radius-s);
+}
+
+.hashtag-chip {
+  border: 1px solid var(--hairline);
+}
+
+/* ---------- Scrollbar ---------- */
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #2E3338;
+  border-radius: 8px;
+  border: 3px solid var(--ink);
+}
+::-webkit-scrollbar-thumb:hover { background: #3D4349; }
+
+/* ---------- Focus visibility ---------- */
+
+:focus-visible {
+  outline: 2px solid var(--acc-cyan);
+  outline-offset: 2px;
+  border-radius: 2px;
+}

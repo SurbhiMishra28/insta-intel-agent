@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+} from 'recharts';
+import { fmtCompact } from '../format.js';
 
 /* Growth tracking: what changed since the agent's stored searches.
-   Every number comes from real recorded scans of this handle —
-   when a baseline (1 week / 1 month ago) doesn't exist yet, the card says so
-   instead of inventing data. */
+   Every number comes from real recorded scans of this handle, collapsed to
+   one snapshot per day — when a baseline (yesterday / 1 week / 1 month ago)
+   doesn't exist yet, the card says so instead of inventing data. */
 
 const timeAgo = (iso) => {
   if (!iso) return '';
@@ -19,9 +23,10 @@ const dateShort = (iso) =>
 const fmtNum = (n) => {
   if (n == null) return '—';
   // Non-integer metrics (avg comments 0.2, cadence 1.75) must keep their
-  // decimals — rounding them to "0" made real data look missing.
-  if (!Number.isInteger(n)) return n.toFixed(1);
-  return n >= 1000 ? n.toLocaleString('en-US') : String(n);
+  // decimals — rounding them to "0" made real data look missing. Big counts
+  // (followers) abbreviate to K/M via the shared formatter.
+  if (!Number.isInteger(n)) return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  return fmtCompact(n);
 };
 
 const fmtDelta = (d, digits = 0) => {
@@ -60,16 +65,77 @@ function DeltaCard({ label, cur, base, delta, unit = '', pct, digits = 0, better
   );
 }
 
+const chartAxis = { fontSize: 10, fill: 'var(--paper-dim)' };
+
+function GrowthChart({ series }) {
+  if (!series || series.length === 0) return null;
+  return (
+    <div className="gt-chart" style={{ marginTop: 14 }}>
+      <p className="gt-history-title" style={{ margin: '0 0 6px' }}>
+        Followers, day by day ({series.length} snapshot{series.length === 1 ? '' : 's'}):
+      </p>
+      <div style={{ width: '100%', height: 170 }}>
+        <ResponsiveContainer>
+          <LineChart data={series} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid stroke="var(--hairline)" strokeDasharray="3 3" vertical={false} />
+            <XAxis
+              dataKey="day"
+              tick={chartAxis}
+              tickFormatter={(d) => dateShort(d)}
+              tickLine={false}
+              axisLine={{ stroke: 'var(--hairline)' }}
+              minTickGap={18}
+            />
+            <YAxis
+              tick={chartAxis}
+              tickLine={false}
+              axisLine={false}
+              width={46}
+              domain={['auto', 'auto']}
+              tickFormatter={(v) => fmtCompact(v)}
+            />
+            <Tooltip
+              contentStyle={{
+                background: 'var(--panel-raised)', border: '1px solid var(--hairline)',
+                borderRadius: 4, fontSize: 12, color: 'var(--paper)',
+              }}
+              labelStyle={{ color: 'var(--paper-dim)' }}
+              formatter={(value, name, item) => {
+                const p = item?.payload || {};
+                const d = p.followers_delta;
+                const line = d != null && d !== 0 ? ` (${d > 0 ? '+' : '−'}${Math.abs(d).toLocaleString('en-US')} vs prev day)` : '';
+                return [`${value.toLocaleString('en-US')} followers${line}`, dateShort(p.day)];
+              }}
+            />
+            <Line
+              type="monotone"
+              dataKey="followers"
+              stroke="var(--signal)"
+              strokeWidth={2}
+              dot={{ r: 3, fill: 'var(--signal)', strokeWidth: 0 }}
+              activeDot={{ r: 4 }}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
 export default function GrowthTracking({ api, handle }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
-  const [baselineIdx, setBaselineIdx] = useState(0);
+  // null = auto-pick the longest available baseline (reset when the handle
+  // changes); a number pins the user's manual tab choice.
+  const [baselineIdx, setBaselineIdx] = useState(null);
 
   useEffect(() => {
     if (!handle) return;
     let alive = true;
     setErr('');
     setData(null);
+    setBaselineIdx(null);
     fetch(`${api}/api/growth-tracking?username=${encodeURIComponent(handle)}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('Could not load growth tracking'))))
       .then((d) => alive && setData(d))
@@ -83,25 +149,35 @@ export default function GrowthTracking({ api, handle }) {
 
   /* --- Not enough history: honest starter state --- */
   if (!data.enough_history) {
+    const days = (data.snapshots || []).length;
     return (
       <div className="gt-root">
         <div className="gt-empty">
           <p className="gt-empty-title">Growth tracking starts today</p>
           <p className="muted">
             This agent has <b>{data.scan_count}</b> stored scan{data.scan_count === 1 ? '' : 's'} of
-            @{handle}{data.scan_count > 0 && <> — the first on {dateShort(data.first_scan)} ({timeAgo(data.first_scan)})</>}.
-            Analyze this handle again after a week or a month, and this section will show exactly
-            what grew — followers, engagement, posting pace — by comparing each new scan against
-            the stored ones. Nothing is estimated: only real fetched numbers are tracked.
+            @{handle}{days > 1 ? ` across ${days} different days` : ''}{data.first_scan && <> — the first on {dateShort(data.first_scan)} ({timeAgo(data.first_scan)})</>}.
+            Growth is tracked day over day, so analyze this handle again tomorrow
+            (or any later day) and this section will show exactly what changed —
+            followers, engagement, posting pace — against today's stored numbers.
+            Nothing is estimated: only real fetched numbers are tracked.
           </p>
         </div>
       </div>
     );
   }
 
-  const { latest, baselines, history } = data;
-  const available = baselines.map((b, i) => ({ ...b, i })).filter((b) => b.available);
-  const chosen = available.find((b) => b.i === baselineIdx) || available[available.length - 1];
+  const { latest, baselines, snapshots, series } = data;
+  if (!latest) return <p className="muted">No stored scans for @{handle} yet.</p>;
+
+  const withIdx = baselines.map((b, i) => ({ ...b, _i: i }));
+  const available = withIdx.filter((b) => b.available);
+  // Default to the longest available span (month > week > yesterday) so a
+  // fresh comparison shows the most meaningful story, not day-zero noise.
+  const chosen =
+    (baselineIdx != null && withIdx.find((b) => b._i === baselineIdx && b.available)) ||
+    available[available.length - 1] ||
+    null;
   const d = chosen?.deltas || {};
   const v = chosen?.values || {};
 
@@ -114,25 +190,27 @@ export default function GrowthTracking({ api, handle }) {
     { label: 'Posting pace', cur: latest.posting_frequency_per_week, base: v.posting_frequency_per_week, delta: d.posting_frequency_per_week, unit: '/wk', digits: 1, better: 'up' },
   ];
 
+  const rows = (snapshots && snapshots.length ? snapshots : []).slice().reverse();
+
   return (
     <div className="gt-root">
       {/* Verdict — the plain-language answer first */}
       <div className="gt-verdict">
-        <span className="gt-verdict-label">@{handle} — growth vs {chosen?.label}</span>
+        <span className="gt-verdict-label">@{handle} — growth vs {chosen?.label || '—'}</span>
         <p>{data.verdict}</p>
       </div>
 
       {/* Baseline switch */}
       <div className="gt-switch" role="tablist" aria-label="Comparison baseline">
-        {baselines.map((b) => (
+        {withIdx.map((b) => (
           <button
             key={b.label}
             role="tab"
-            aria-selected={chosen?.i === b.i}
-            className={`gt-switch-btn ${chosen?.i === b.i ? 'on' : ''}`}
+            aria-selected={chosen?._i === b._i}
+            className={`gt-switch-btn ${chosen?._i === b._i ? 'on' : ''}`}
             disabled={!b.available}
-            title={b.available ? `Compare against the stored scan from ${timeAgo(b.scanned_at)}` : 'No stored scan near that date'}
-            onClick={() => setBaselineIdx(b.i)}
+            title={b.available ? `Compare against the ${dateShort(b.scanned_at)} snapshot (${timeAgo(b.scanned_at)})` : 'No stored scan near that date'}
+            onClick={() => setBaselineIdx(b._i)}
           >
             {b.label}
           </button>
@@ -146,24 +224,29 @@ export default function GrowthTracking({ api, handle }) {
         ))}
       </div>
 
-      {/* The real scan history behind the comparison */}
-      {history?.length > 0 && (
+      {/* Day-scale trend behind the comparison */}
+      <GrowthChart series={series} />
+
+      {/* The real scan history behind the comparison: one row per day */}
+      {rows.length > 0 && (
         <>
-          <p className="gt-history-title">Stored scan history ({history.length} searches by the agent):</p>
+          <p className="gt-history-title">
+            Stored scan history ({data.scan_count} searches across {rows.length} day{rows.length === 1 ? '' : 's'} — one row per day):
+          </p>
           <div className="gt-history">
-            {history.map((s, i) => (
-              <div className="gt-history-row" key={i}>
-                <span className="gt-history-date">{dateShort(s.scanned_at)}</span>
+            {rows.map((s) => (
+              <div className="gt-history-row" key={s.day}>
+                <span className="gt-history-date">{dateShort(s.day)}</span>
                 <span className="gt-history-val">{fmtNum(s.followers)} followers</span>
-                <span className="gt-history-val">{s.engagement_rate}% ER</span>
+                <span className="gt-history-val">{fmtNum(s.engagement_rate)}% ER</span>
                 <span className="gt-history-val">{fmtNum(s.avg_likes)} avg likes</span>
                 {s.avg_comments != null && (
                   <span className="gt-history-val">{fmtNum(s.avg_comments)} avg comments</span>
                 )}
-                <span className="gt-history-val">{s.posting_frequency_per_week}/wk</span>
-                {s.followers_delta !== 0 && (
-                  <span className={`gt-history-delta ${s.followers_delta > 0 ? 'up' : 'down'}`}>
-                    {s.followers_delta > 0 ? '▲' : '▼'} {fmtDelta(s.followers_delta)}
+                <span className="gt-history-val">{fmtNum(s.posting_frequency_per_week)}/wk</span>
+                {s.scan_count > 1 && (
+                  <span className="gt-history-val" title="Repeated scans this day were collapsed into one snapshot">
+                    ×{s.scan_count} scans
                   </span>
                 )}
               </div>

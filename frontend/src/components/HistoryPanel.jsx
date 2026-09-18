@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { fmtCompact as fmt } from '../format.js';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-const fmt = (n) => (typeof n === 'number' ? n.toLocaleString('en-US') : '—');
 
 function timeAgo(iso) {
   try {

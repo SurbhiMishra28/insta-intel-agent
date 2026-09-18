@@ -703,8 +703,8 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
     fallback = _rule_based_bio(insight)
 
     try:
-        from ai_engine import _get_llm, _profile_facts
-        llm = _get_llm()
+        from ai_engine import _get_llm, _profile_facts, _llm_available, _llm_trip_breaker, _llm_note_success
+        llm = _get_llm() if _llm_available() else None
         if llm is None:
             return fallback
         from langchain_core.prompts import ChatPromptTemplate
@@ -728,9 +728,11 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
             result.current_bio = insight.profile.bio or ""
             if not result.notes:
                 result.notes = fallback.notes
+            _llm_note_success()
             return result
         return fallback
-    except Exception:
+    except Exception as e:
+        _llm_trip_breaker(f"bio optimizer failed: {str(e)[:80]}")
         return fallback
 
 

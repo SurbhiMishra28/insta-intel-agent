@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { fmtCompact } from '../format.js';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -27,10 +28,10 @@ export default function ChatBox({ context }) {
         const c = context;
         ctx = [
           `Account: @${c.profile?.username || 'unknown'}`,
-          `Followers: ${c.profile?.followers?.toLocaleString() || 'N/A'}`,
+          `Followers: ${c.profile?.followers != null ? fmtCompact(c.profile.followers) : 'N/A'}`,
           `Engagement rate: ${c.metrics?.engagement_rate || 'N/A'}%`,
           `Avg likes/post: ${c.metrics?.avg_likes || 'N/A'}`,
-          `Avg comments/post: ${c.metrics?.avg_comments || 'N/A'}`,
+          `Avg comments/post: ${c.metrics?.avg_comments != null ? c.metrics.avg_comments : 'N/A'}`,
           `Posting frequency: ${c.metrics?.posting_frequency_per_week || 'N/A'}/week`,
           `Best format: ${c.metrics?.best_content_type || 'N/A'}`,
           `Top hashtags: ${(c.metrics?.top_hashtags || []).join(', ') || 'none'}`,

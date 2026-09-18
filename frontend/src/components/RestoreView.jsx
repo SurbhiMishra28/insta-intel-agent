@@ -1,6 +1,5 @@
 import ProfileReadout from './ProfileReadout.jsx';
-
-const fmt = (n) => (typeof n === 'number' ? n.toLocaleString('en-US') : '—');
+import { fmtCompact as fmt } from '../format.js';
 
 function timeAgo(iso) {
   try {

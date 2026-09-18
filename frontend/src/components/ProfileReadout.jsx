@@ -1,10 +1,5 @@
 import FollowerGrowthIcon from './FollowerGrowthIcon.jsx';
-
-function fmt(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
-}
+import { fmtCompact as fmt } from '../format.js';
 
 /* Per-post engagement breakdown for the recent sample — makes the averages
    transparent: avg likes/comments are literally the sum of these rows

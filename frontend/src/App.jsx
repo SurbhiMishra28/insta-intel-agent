@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import ProfileReadout, { AvgCommentBreakdown } from './components/ProfileReadout.jsx';
+import { fmtCompact as fmtBig } from './format.js';
 import RankingBars from './components/RankingBars.jsx';
 import EngagementChart from './components/EngagementChart.jsx';
 import Report from './components/Report.jsx';
@@ -16,7 +17,6 @@ import MonthlyReviewer from './components/MonthlyReviewer.jsx';
 import WhitespaceFinder from './components/WhitespaceFinder.jsx';
 import PWAInstallBanner from './components/PWAInstallBanner.jsx';
 import ChatBox from './components/ChatBox.jsx';
-import GrowthTracking from './components/GrowthTracking.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import RestoreView from './components/RestoreView.jsx';
 
@@ -31,8 +31,15 @@ function previewHandle(raw) {
   return m ? m[1].toLowerCase() : '';
 }
 
-const fmt = (n) =>
-  typeof n === 'number' ? n.toLocaleString('en-US') : '—';
+const fmt = (n) => {
+  if (n == null || n === '') return '—';
+  // Number-like strings (e.g. "0.2" from toFixed) are real data — the old
+  // strict typeof check turned them into '—' and made the Avg comments
+  // stat look missing even when the value was present.
+  if (typeof n === 'number') return n.toLocaleString('en-US');
+  if (!Number.isNaN(Number(n))) return String(n);
+  return '—';
+};
 
 function erVerdict(er) {
   if (er >= 6) return { label: 'Excellent', cls: 'good' };
@@ -60,9 +67,9 @@ function ScoreRing({ value }) {
   );
 }
 
-function Section({ id, label, children }) {
+function Section({ id, label, accent, children }) {
   return (
-    <section className="section" id={id}>
+    <section className="section" id={id} data-accent={accent}>
       <p className="section-label">{label}</p>
       {children}
     </section>
@@ -276,7 +283,6 @@ export default function App() {
     ['profile', 'Profile'],
     ['report', 'AI report'],
     ['plan', 'Growth plan'],
-    ['tracking', 'Growth tracking'],
     ['timing', 'Timing'],
     ['toolkit', 'Toolkit'],
     ['trends', 'Trends'],
@@ -330,7 +336,7 @@ export default function App() {
       {restoreData && !dash && (
         <>
           <RestoreView data={restoreData} />
-          <Section id="history" label="History — accounts you searched · restore or download full data">
+          <Section id="history" accent="cyan" label="History — accounts you searched · restore or download full data">
             <HistoryPanel
               activeHandle={restoreData.profile?.username}
               onRestore={restoreSearch}
@@ -388,11 +394,11 @@ export default function App() {
               <p className="dash-hero-bio">{p?.bio || p?.full_name || ''}</p>
               <div className="dash-stats">
                 <div className="stat">
-                  <div className="num">{fmt(p?.followers)}</div>
+                  <div className="num">{fmtBig(p?.followers)}</div>
                   <div className="label">Followers</div>
                 </div>
                 <div className="stat">
-                  <div className="num">{fmt(p?.posts_count)}</div>
+                  <div className="num">{fmtBig(p?.posts_count)}</div>
                   <div className="label">Posts</div>
                 </div>
                 <div className="stat highlight">
@@ -400,7 +406,7 @@ export default function App() {
                   <div className="label">Engagement rate</div>
                 </div>
                 <div className="stat">
-                  <div className="num">{fmt(m?.avg_comments != null ? m.avg_comments.toFixed(1) : null)}</div>
+                  <div className="num">{m?.avg_comments != null ? m.avg_comments.toFixed(1) : '—'}</div>
                   <div className="label">Avg comments</div>
                 </div>
                 <div className="stat">
@@ -438,21 +444,17 @@ export default function App() {
             </div>
           )}
 
-          <Section id="report" label="AI intelligence report">
+          <Section id="report" accent="violet" label="AI intelligence report">
             <Report insight={main} />
           </Section>
 
           {dash.plan && (
-            <Section id="plan" label="Growth plan — what to post next">
+            <Section id="plan" accent="green" label="Growth plan — what to post next">
               <GrowthPlanView plan={dash.plan} />
             </Section>
           )}
 
-          <Section id="tracking" label="Growth tracking — what changed since the agent's stored searches">
-            <GrowthTracking api={API_URL} handle={handle} />
-          </Section>
-
-          <Section id="timing" label="Timing intelligence — when to post">
+          <Section id="timing" accent="amber" label="Timing intelligence — when to post">
             <div className="grid-2">
               {dash.best_times && <BestTimes bestTimes={dash.best_times} />}
               {dash.cadence_map && <CadenceTimingMap cadenceMap={dash.cadence_map} />}
@@ -462,17 +464,16 @@ export default function App() {
             </div>
           </Section>
 
-          <Section id="toolkit" label="Optimizer toolkit — ready to paste">
+          <Section id="toolkit" accent="cyan" label="Optimizer toolkit — ready to paste">
             <ExtrasGrid
               bio={dash.bio}
               hashtags={dash.hashtags}
-              history={dash.history}
               reelTiming={null}
               hashtagSuggestions={dash.hashtag_suggestions}
             />
           </Section>
 
-          <Section id="trends" label="Trend plays for this account">
+          <Section id="trends" accent="rose" label="Trend plays for this account">
             {dash.trends_result ? (
               <Trends trends={dash.trends_result} />
             ) : (
@@ -481,7 +482,7 @@ export default function App() {
           </Section>
 
           {/* ---------- Deep dives ---------- */}
-          <Section id="research" label="Deep dives — go further with one click">
+          <Section id="research" accent="violet" label="Deep dives — go further with one click">
             <div className="deep-grid">
               <button
                 className="deep-card"
@@ -580,7 +581,7 @@ export default function App() {
             )}
           </Section>
 
-          <Section id="history" label="History — accounts you searched · restore or download full data">
+          <Section id="history" accent="cyan" label="History — accounts you searched · restore or download full data">
             <HistoryPanel
               activeHandle={handle}
               onRestore={restoreSearch}
