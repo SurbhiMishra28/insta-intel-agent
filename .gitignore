@@ -18,6 +18,7 @@ dist/
 
 # Runtime artifacts
 backend/uvicorn.log
+backend_server.log
 frontend/vite.log
 backend/scan_history.db
 backend/profile_cache.db

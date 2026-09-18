@@ -24,7 +24,19 @@ shape, so the app works with no API key and never breaks because of an
 LLM/network failure.
 """
 import os
+import sys as _sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
+
+# Runtime diagnostics (circuit breaker, provider logs) can carry Instagram
+# captions/bios with typographic characters (U+202F etc.) that the Windows
+# cp1252 console codec cannot encode — crashing a *log line* and with it the
+# whole analysis. Decode-safe streams prevent that.
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -72,9 +84,12 @@ if LLM_API_KEY.startswith("nvapi") and not LLM_BASE_URL:
 class ProfileNarrative(BaseModel):
     """LLM output for the per-profile insight chain."""
     summary: str = Field(description="2-4 sentence analyst summary of the account")
-    strengths: List[str] = Field(max_length=3, description="Up to 3 specific strengths")
-    weaknesses: List[str] = Field(max_length=3, description="Up to 3 specific weaknesses")
-    recommendations: List[str] = Field(max_length=4, description="Up to 4 concrete, specific recommendations")
+    # max_length is deliberately absent: strict list caps made the free-tier
+    # LLM's occasional 5-item list a hard validation error, which failed the
+    # whole insight chain. Over-long lists are trimmed downstream instead.
+    strengths: List[str] = Field(description="Up to 3 specific strengths")
+    weaknesses: List[str] = Field(description="Up to 3 specific weaknesses")
+    recommendations: List[str] = Field(description="Up to 4 concrete, specific recommendations")
 
 
 class MarketResearch(BaseModel):
@@ -116,7 +131,7 @@ def _get_llm(temperature: float = LLM_TEMPERATURE):
         base_url=LLM_BASE_URL or None,
         temperature=temperature,
         max_retries=1,
-        timeout=int(os.getenv("LLM_TIMEOUT", "90")),  # NIM cold starts can exceed 45s
+        timeout=int(os.getenv("LLM_TIMEOUT", "20")),  # bounded: NIM outages must degrade fast
         # Bounds hidden reasoning + output; too small truncates the JSON and
         # forces wasteful retries, too big lets a chain hog the request.
         max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4000")),
@@ -124,6 +139,30 @@ def _get_llm(temperature: float = LLM_TEMPERATURE):
     )
     _LLM_CACHE[temperature] = llm
     return llm
+
+
+# --- LLM circuit breaker ---------------------------------------------------
+# When the LLM provider is down/slow (e.g. NVIDIA NIM outage), every chain
+# used to pay the full client timeout (x2 retries) before falling back to
+# the rule-based narrative — analyze calls hung for minutes. The breaker
+# opens after the first failure and short-circuits every LLM call for a
+# cooldown window; the deterministic narrative serves instantly meanwhile.
+_LLM_BREAKER = {"open_until": 0.0}
+_LLM_BREAKER_COOLDOWN = float(os.getenv("LLM_BREAKER_COOLDOWN", "120"))
+
+
+def _llm_available() -> bool:
+    return time.monotonic() >= _LLM_BREAKER["open_until"]
+
+
+def _llm_trip_breaker(reason: str) -> None:
+    until = time.monotonic() + _LLM_BREAKER_COOLDOWN
+    _LLM_BREAKER["open_until"] = until
+    print(f"[llm] circuit breaker OPEN for {_LLM_BREAKER_COOLDOWN:.0f}s ({reason})", flush=True)
+
+
+def _llm_note_success() -> None:
+    _LLM_BREAKER["open_until"] = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +406,7 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
 
     narrative = _rule_based_summary(profile, metrics)
 
-    llm = _get_llm()
+    llm = _get_llm() if _llm_available() else None
     if llm is not None:
         try:
             from langchain_core.prompts import ChatPromptTemplate
@@ -376,16 +415,20 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
             )
             chain = prompt | llm.with_structured_output(ProfileNarrative)
             narrative = chain.invoke({"facts": _profile_facts(profile, metrics)})
-        except Exception:
-            pass  # keep the rule-based narrative on any LLM failure
+            _llm_note_success()
+        except Exception as e:
+            _llm_trip_breaker(f"insight chain failed: {str(e)[:80]}")
+            # keep the rule-based narrative on any LLM failure
 
     insight = ProfileInsight(
         profile=profile,
         metrics=metrics,
         ai_summary=narrative.summary,
-        strengths=narrative.strengths,
-        weaknesses=narrative.weaknesses,
-        recommendations=narrative.recommendations,
+        # The schema no longer hard-caps these lists (a 5th item used to
+        # fail the whole chain) — trim the extras here instead.
+        strengths=narrative.strengths[:3],
+        weaknesses=narrative.weaknesses[:3],
+        recommendations=narrative.recommendations[:4],
         account_score=account_score_from(profile, metrics),
     )
     _INSIGHT_MEMO[key] = insight
@@ -592,8 +635,8 @@ def pick_competitors(main_profile: ProfileData, candidates: List[dict], count: i
             picked = [u for u in result.picked if u and u.lower() in valid and u.lower() != main_profile.username.lower()]
             if picked:
                 return picked[:count], result.rationale
-        except Exception:
-            pass
+        except Exception as e:
+            _llm_trip_breaker(f"competitor pick failed: {str(e)[:80]}")
 
     fallback = _rule_based_pick(main_profile, candidates, count)
     return fallback.picked, fallback.rationale
@@ -686,7 +729,7 @@ def build_market_research(main: ProfileInsight, competitors: List[ProfileInsight
 
     research = _rule_based_market_research(main, competitors)
 
-    llm = _get_llm()
+    llm = _get_llm() if _llm_available() else None
     if llm is not None:
         try:
             from langchain_core.prompts import ChatPromptTemplate
@@ -710,8 +753,10 @@ def build_market_research(main: ProfileInsight, competitors: List[ProfileInsight
                 ),
             })
             research = llm_research
-        except Exception:
-            pass  # keep rule-based research on any LLM failure
+            _llm_note_success()
+        except Exception as e:
+            _llm_trip_breaker(f"market research failed: {str(e)[:80]}")
+            # keep rule-based research on any LLM failure
 
     _MARKET_MEMO[key] = (_time.time(), research)
     if len(_MARKET_MEMO) > 100:
@@ -922,7 +967,7 @@ def build_growth_plan(main: ProfileInsight, rivals: Optional[List[ProfileInsight
     rivals = rivals or []
     plan = _rule_based_growth_plan(main, rivals)
 
-    llm = _get_llm()
+    llm = _get_llm() if _llm_available() else None
     if llm is not None:
         try:
             from langchain_core.prompts import ChatPromptTemplate
@@ -941,8 +986,9 @@ def build_growth_plan(main: ProfileInsight, rivals: Optional[List[ProfileInsight
             # Sanity: never let an LLM hallucinate an empty plan.
             if llm_plan.post_ideas and llm_plan.content_pillars:
                 plan = llm_plan
-        except Exception:
-            pass
+                _llm_note_success()
+        except Exception as e:
+            _llm_trip_breaker(f"growth plan failed: {str(e)[:80]}")
 
     return plan
 
@@ -1583,7 +1629,7 @@ def generate_whitespace_and_captions(
     captions = _rule_based_captions(insight, whitespace)
     warnings: List[str] = []
 
-    llm = _get_llm()
+    llm = _get_llm() if _llm_available() else None
     if llm is not None:
         try:
             from langchain_core.prompts import ChatPromptTemplate
@@ -1625,9 +1671,10 @@ def generate_whitespace_and_captions(
                 llm_result.main = insight
                 llm_result.coverage = coverage  # deterministic numbers win
                 llm_result.warnings = warnings
+                _llm_note_success()
                 return llm_result
-        except Exception:
-            pass
+        except Exception as e:
+            _llm_trip_breaker(f"whitespace chain failed: {str(e)[:80]}")
 
     return WhitespaceResponse(
         main=insight,

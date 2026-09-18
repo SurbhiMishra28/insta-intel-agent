@@ -43,7 +43,17 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import sys as _sys
+
+# Provider diagnostics can carry characters the Windows cp1252 console codec
+# cannot encode (bios, captions) — a crashing print must never kill a fetch.
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 from urllib.parse import quote
 
 import httpx
@@ -63,6 +73,44 @@ APIFY_RUN_TIMEOUT = int(os.getenv("APIFY_RUN_TIMEOUT", "300"))  # seconds
 # Default false: a failed live fetch must fail loudly (503/502) rather than
 # silently serve fake data. Opt in to demo fallback explicitly.
 FALLBACK_TO_DEMO = os.getenv("FALLBACK_TO_DEMO", "false").lower() in ("1", "true", "yes")
+
+# --- Official Instagram Graph API (business_discovery) — provider #0 ------
+# When configured, real data comes from Meta's ToS-compliant API instead of
+# any scraping path. IG_ACCESS_TOKEN: long-lived Facebook User access token
+# with instagram_basic + instagram_manage_insights + pages_read_engagement.
+# IG_BUSINESS_ACCOUNT_ID: the numeric ID of YOUR OWN Instagram professional
+# account (the "app user" the discovery query is performed on).
+IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "").strip()
+IG_BUSINESS_ACCOUNT_ID = os.getenv("IG_BUSINESS_ACCOUNT_ID", "").strip()
+IG_GRAPH_VERSION = os.getenv("IG_GRAPH_VERSION", "v25.0").strip() or "v25.0"
+IG_GRAPH_TIMEOUT = float(os.getenv("IG_GRAPH_TIMEOUT", "20"))
+
+
+def _has_graph_credentials() -> bool:
+    return bool(IG_ACCESS_TOKEN and IG_BUSINESS_ACCOUNT_ID)
+
+
+class _Perf:
+    """Stage stopwatch for one profile fetch: prints elapsed time per stage
+    to the server log ([perf] prefix) so slow cold fetches can be attributed
+    to a layer instead of guessed at. Zero cost when disabled."""
+
+    ENABLED = os.getenv("IG_FETCH_DEBUG", "0").lower() in ("1", "true", "yes")
+
+    def __init__(self, label: str):
+        self.label = label
+        self.t0 = time.monotonic()
+        self.t_last = self.t0
+
+    def stage(self, name: str) -> None:
+        if not self.ENABLED:
+            return
+        now = time.monotonic()
+        print(
+            f"[perf] {self.label}: {name} +{now - self.t_last:.2f}s (total {now - self.t0:.2f}s)",
+            flush=True,
+        )
+        self.t_last = now
 
 # ---------------------------------------------------------------------------
 # Apify token pool — multi-account failover
@@ -907,6 +955,227 @@ async def _run_search_actor(queries: List[str], limit: int) -> List[Dict[str, An
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Provider #0 — OFFICIAL Instagram Graph API (business_discovery)
+#
+#   GET https://graph.facebook.com/<IG_BUSINESS_ACCOUNT_ID>
+#       ?fields=business_discovery.username(<target>){biography,name,
+#           followers_count,media_count,
+#           media.limit(N){caption,like_count,comments_count,timestamp,
+#                          media_type,media_product_type}}
+#       &access_token=<IG_ACCESS_TOKEN>
+#
+# Official, ToS-compliant, no scraping, no IP blocks. Requirements (from
+# Meta's docs): the token needs instagram_basic + instagram_manage_insights
+# + pages_read_engagement; the TARGET account must be an Instagram Business
+# or Creator ("professional") account — personal accounts are NOT
+# discoverable, and age-gated accounts return nothing.
+#
+# Honest gaps in the official API (documented, not bugs):
+#   - `following` count is not exposed  -> served as 0
+#   - verification badge is not exposed -> served as False
+#   - business category is not public   -> served as None
+# Errors: ValueError = account-level problem (handle not found / not a
+# professional account); RuntimeError = token/app/HTTP problem (these two
+# behave differently in the provider ladder: ValueError surfaces, RuntimeError
+# falls through to the next provider).
+# ---------------------------------------------------------------------------
+
+_GRAPH_BASE = "https://graph.facebook.com"
+
+
+def _graph_media_fields() -> str:
+    """Fields requested on each discovered media object."""
+    return "id,caption,like_count,comments_count,timestamp,media_type,media_product_type"
+
+
+def _business_discovery_fields(username: str, media_limit: int) -> str:
+    return (
+        f"business_discovery.username({username})"
+        f"{{biography,name,followers_count,media_count,"
+        f"media.limit({media_limit}){{{_graph_media_fields()}}}}}"
+    )
+
+
+def _raise_graph_error(err: dict) -> None:
+    """Translate a Graph API error object into a clear exception.
+    code 190 / OAuthException -> token problem (RuntimeError, recoverable by
+    the ladder); rate-limit codes -> RuntimeError; username/account problems
+    -> ValueError (surfaced to the user)."""
+    code = int(err.get("code") or 0)
+    msg = str(err.get("message") or "Unknown Graph API error")
+    type_ = str(err.get("type") or "")
+    low = msg.lower()
+
+    if code == 190 or (type_ == "OAuthException" and "access token" in low):
+        raise RuntimeError(
+            "Instagram Graph API rejected the access token (code 190). "
+            "IG_ACCESS_TOKEN is missing, expired, or lacks the required "
+            "permissions (instagram_basic, instagram_manage_insights, "
+            "pages_read_engagement). Generate a long-lived token — see the "
+            "setup steps in backend/.env.example."
+        )
+    if code in (4, 17, 32, 613) or "rate limit" in low:
+        raise RuntimeError(
+            f"Instagram Graph API rate limit hit (code {code}): {msg}"
+        )
+    if (
+        "does not exist" in low
+        or "is not a business" in low
+        or ("username" in low and "business" in low)
+        or "cannot be found" in low
+    ):
+        raise ValueError(
+            f"Instagram account '@{msg}' — the official API reports this "
+            "handle either does not exist, is private, or is NOT a "
+            "Business/Creator account. The Graph API can only discover "
+            "professional accounts; personal accounts need another provider."
+        )
+    raise RuntimeError(f"Instagram Graph API error (code {code}): {msg}")
+
+
+def _days_ago_from_iso(ts: str) -> int:
+    """Graph API ISO-8601 timestamp ('2026-08-20T12:34:56+0000') -> whole
+    days elapsed. Unparseable timestamps count as 0 days old."""
+    if not ts:
+        return 0
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, int((time.time() - dt.timestamp()) / 86400))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _parse_business_discovery_payload(payload: dict, requested: str) -> ProfileData:
+    """Graph API response -> ProfileData/Post. Parsing lives in its own
+    function so it can be tested with recorded payloads without network."""
+    if not isinstance(payload, dict):
+        raise RuntimeError("Instagram Graph API returned an unexpected payload shape.")
+    if isinstance(payload.get("error"), dict) and payload["error"]:
+        _raise_graph_error(payload["error"])
+
+    bd = payload.get("business_discovery")
+    if not isinstance(bd, dict) or not bd:
+        # A 200 with no business_discovery and no error object means the
+        # target handle was not discovered.
+        raise ValueError(
+            f"Instagram account '@{requested}' was not returned by the "
+            "Graph API — the handle either does not exist, is private, or "
+            "is not a Business/Creator account (the official API can only "
+            "discover professional accounts)."
+        )
+
+    followers = int(bd.get("followers_count") or 0)
+    if followers == 0 and bd.get("followers_count") is None:
+        # Professional accounts always expose followers_count; a missing one
+        # means the target is not actually a professional account.
+        raise ValueError(
+            f"Instagram account '@{requested}' exposes no follower count "
+            "via the Graph API — it is probably not a Business/Creator "
+            "account. Switch it to a professional account in the Instagram "
+            "app, or use a different data provider."
+        )
+
+    username = requested.lower()
+    full_name = str(bd.get("name") or "").strip() or \
+        username.replace("_", " ").replace(".", " ").title()
+
+    posts: List[Post] = []
+    media = bd.get("media") or {}
+    for item in (media.get("data") or []):
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        caption = str(item.get("caption") or "")
+        raw_type = str(item.get("media_type") or "IMAGE").upper()
+        if raw_type == "VIDEO" and str(item.get("media_product_type") or "").upper() == "REELS":
+            media_type = "reel"
+        elif raw_type == "VIDEO":
+            media_type = "video"
+        elif raw_type == "CAROUSEL_ALBUM":
+            media_type = "carousel"
+        else:
+            media_type = "image"
+        posts.append(Post(
+            id=str(item["id"]),
+            caption=caption[:600],
+            likes=int(item.get("like_count") or 0),
+            comments=int(item.get("comments_count") or 0),
+            posted_days_ago=_days_ago_from_iso(item.get("timestamp") or ""),
+            # Same shape as every other provider: lowercase '#tag' chips,
+            # unique, ordered by first appearance, capped at 10.
+            hashtags=list(dict.fromkeys(f"#{h.lower()}" for h in re.findall(r"#(\w+)", caption)))[:10],
+            media_type=media_type,
+            views=0,  # view_count needs extra insight permissions; not public
+            posted_at=None,
+        ))
+
+    return ProfileData(
+        username=username,
+        full_name=full_name,
+        bio=str(bd.get("biography") or ""),
+        followers=followers,
+        following=0,  # NOT exposed by the official API — honest zero
+        posts_count=int(bd.get("media_count") or 0),
+        is_verified=False,  # badge is not exposed by the official API
+        is_business=True,   # business_discovery only sees professional accounts
+        category=None,      # target's category is not a public field
+        recent_posts=posts,
+    )
+
+
+async def fetch_live_profile(username: str) -> ProfileData:
+    """Provider #0 — official Instagram Graph API business_discovery fetch.
+
+    Returns a real ProfileData for the target handle. Raises:
+      - ValueError  when the TARGET account is unusable (not found, private,
+                    or not a Business/Creator account) — surfaced to the user.
+      - RuntimeError when the TOKEN/app is the problem (invalid/expired,
+                    missing permissions, rate limit, HTTP failure) — the
+                    provider ladder falls through to the next provider.
+    Env: IG_ACCESS_TOKEN, IG_BUSINESS_ACCOUNT_ID (your own professional
+    account's numeric ID), optional IG_GRAPH_VERSION (default v25.0).
+    """
+    if not _has_graph_credentials():
+        raise RuntimeError(
+            "Instagram Graph API is not configured: set IG_ACCESS_TOKEN and "
+            "IG_BUSINESS_ACCOUNT_ID in backend/.env (see .env.example)."
+        )
+    # Graph caps media.limit at 25; the project sample width (12) fits.
+    media_limit = max(1, min(25, int(os.getenv("IG_PERMALINK_POSTS", "12"))))
+    url = f"{_GRAPH_BASE}/{IG_GRAPH_VERSION}/{IG_BUSINESS_ACCOUNT_ID}"
+    params = {
+        "fields": _business_discovery_fields(username, media_limit),
+        "access_token": IG_ACCESS_TOKEN,
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=IG_GRAPH_TIMEOUT, follow_redirects=True
+        ) as client:
+            resp = await client.get(url, params=params)
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Instagram Graph API request failed: {str(e)[:140]}")
+
+    if resp.status_code != 200:
+        try:
+            err = resp.json().get("error") or {}
+        except Exception:
+            err = {}
+        if err:
+            _raise_graph_error(err)
+        raise RuntimeError(
+            f"Instagram Graph API returned HTTP {resp.status_code} for the "
+            "business_discovery query."
+        )
+    try:
+        payload = resp.json()
+    except Exception:
+        raise RuntimeError("Instagram Graph API returned a non-JSON response.")
+
+    return _parse_business_discovery_payload(payload, username)
+
+
 async def _fetch_live_profile(username: str) -> ProfileData:
     """Fetch a real profile. Primary: one 'details' run, which returns the
     profile fields plus its ~12 latest posts with real engagement. Fallback:
@@ -957,7 +1226,7 @@ async def _fetch_live_profile(username: str) -> ProfileData:
 
 IG_WEB_APP_ID = os.getenv("IG_WEB_APP_ID", "936619743392459")
 DIRECT_FETCH_ENABLED = os.getenv("DIRECT_FETCH", "true").lower() in ("1", "true", "yes")
-_DIRECT_TIMEOUT = int(os.getenv("DIRECT_FETCH_TIMEOUT", "25"))  # seconds
+_DIRECT_TIMEOUT = int(os.getenv("DIRECT_FETCH_TIMEOUT", "15"))  # seconds
 _DIRECT_HOSTS = ("https://www.instagram.com", "https://i.instagram.com")
 
 _DIRECT_HEADERS = {
@@ -976,6 +1245,15 @@ _DIRECT_HEADERS = {
 # Session bootstrap state (cookies + LSD token), refreshed periodically.
 _direct_session: Dict[str, Any] = {"cookies": None, "lsd": "", "ts": 0.0}
 _DIRECT_SESSION_TTL = 30 * 60  # seconds; re-seed cookies/LSD after this
+
+# web_profile_info is IP-blocked on many networks (401/403/429 on every call).
+# After a block, skip that doomed attempt for a cooldown window instead of
+# paying its latency on every fetch.
+_API_BLOCK_COOLDOWN = float(os.getenv("IG_API_BLOCK_COOLDOWN", "600"))
+_api_block_until = 0.0
+
+# Background refresh bookkeeping (stale-while-revalidate).
+_refresh_inflight: set = set()
 
 
 def _extract_lsd_token(html: str) -> str:
@@ -1031,14 +1309,32 @@ def _map_direct_user(user: Dict[str, Any], requested: str) -> ProfileData:
         )
         if p
     ]
+    # Modern GraphQL blobs (Relay prefetch, xdt_api v1) carry the stats as
+    # flat scalar fields — follower_count/following_count/all_media_count —
+    # while the legacy web_profile_info shape wraps them in edge_* objects.
+    # Accept both or big accounts parsed 0 followers from a perfectly good
+    # payload.
+    followers = (
+        _to_int(_dig(user, "edge_followed_by.count"))
+        or _to_int(user.get("follower_count"))
+    )
+    following = (
+        _to_int(_dig(user, "edge_follow.count"))
+        or _to_int(user.get("following_count"))
+    )
+    posts_count = (
+        _to_int(_dig(user, "edge_owner_to_timeline_media.count"))
+        or _to_int(user.get("all_media_count"))
+        or _to_int(user.get("media_count"))
+    )
     return ProfileData(
         username=username,
         full_name=_clean_str(user.get("full_name"))
         or username.replace("_", " ").replace(".", " ").title(),
         bio=_clean_str(user.get("biography")) or "",
-        followers=_to_int(_dig(user, "edge_followed_by.count")),
-        following=_to_int(_dig(user, "edge_follow.count")),
-        posts_count=_to_int(_dig(user, "edge_owner_to_timeline_media.count")),
+        followers=followers,
+        following=following,
+        posts_count=posts_count,
         is_verified=_as_bool(user.get("is_verified")),
         is_business=_as_bool(user.get("is_business_account")),
         category=_clean_str(user.get("category_name"))
@@ -1051,7 +1347,10 @@ _chrome_semaphore = asyncio.Semaphore(1)  # serialize headless profile-page laun
 # Post-permalink renders are tiny pages and independent of each other, so a
 # few can run concurrently — sequential rendering made the like/comment
 # backfill the slowest step of a cold fetch (~8s x N posts one-by-one).
-_PERMALINK_CONCURRENCY = int(os.getenv("IG_PERMALINK_CONCURRENCY", "3"))
+_PERMALINK_CONCURRENCY = int(os.getenv("IG_PERMALINK_CONCURRENCY", "5"))
+# Heavy account pages (millions of followers) take noticeably longer to
+# render than small ones; raising the cap shortens cold fetches for those
+# without changing data content.
 _permalink_semaphore = asyncio.Semaphore(max(1, _PERMALINK_CONCURRENCY))
 
 
@@ -1239,53 +1538,100 @@ async def _cdp_page_eval(js: str, url: str, settle_ms: int = 4000) -> Optional[s
         return None
 
 
-def _extract_profile_from_html(html: str, requested: str) -> Optional[ProfileData]:
-    """Last-resort parse of a plain instagram.com/<handle>/ HTML page.
+async def _cdp_render_many(urls: List[str], settle_ms: int = 5000) -> Dict[str, str]:
+    """Render SEVERAL URLs in parallel tabs of ONE shared headless Chrome
+    (the persistent debuggee) and return {url: final HTML}.
 
-    Instagram serves profile data in embedded JSON blobs; when those are
-    absent (login-wall shell), og:description meta tags still carry the
-    essentials ("123 Followers, 45 Following, 67 Posts"). Returns None when
-    nothing usable is found."""
-    if not html:
-        return None
+    Rendering each permalink as its own `chrome --dump-dom` process costs a
+    cold browser start (~9s) per post — 12 posts meant ~55s even with
+    concurrency, because the work ran in 2-3 sequential waves. Tabs of a
+    single running browser need no process start, so the whole batch loads
+    at once and finishes in roughly one page-load time (~6-10s).
 
-    # Preferred: embedded JSON with the full user object.
-    for m in re.finditer(r'<script type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL):
+    Returns {} when the debuggee/websockets are unavailable — callers then
+    fall back to the per-post process renderer. Failed URLs are simply
+    absent from the result."""
+    if not urls:
+        return {}
+    try:
+        import websockets
+    except Exception:
+        return {}
+    ws_url = await asyncio.to_thread(_cdp_ws_url)
+    if not ws_url:
+        return {}
+
+    import urllib.request as _uq
+
+    def _http_json(path: str, method: str = "GET") -> Optional[dict]:
         try:
-            data = json.loads(m.group(1))
+            req = _uq.Request(f"http://127.0.0.1:{_CDP_PORT}{path}", method=method)
+            with _uq.urlopen(req, timeout=5) as r:
+                return json.loads(r.read().decode("utf-8"))
         except Exception:
-            continue
-
-        def _find_user(obj):
-            if isinstance(obj, dict):
-                if "edge_followed_by" in obj and "username" in obj:
-                    return obj
-                for v in obj.values():
-                    found = _find_user(v)
-                    if found:
-                        return found
-            elif isinstance(obj, list):
-                for v in obj:
-                    found = _find_user(v)
-                    if found:
-                        return found
             return None
 
-        user = _find_user(data)
-        if user:
-            try:
-                return _map_direct_user(user, requested)
-            except Exception:
-                continue
+    # One new tab per URL (PUT is required by newer Chrome builds).
+    tabs: List[tuple] = []  # (target_url, tab_ws_url, tab_id)
+    for i, url in enumerate(urls):
+        meta = _http_json("/json/new?" + _uq.quote(url, safe=""), method="PUT")
+        if isinstance(meta, dict) and meta.get("webSocketDebuggerUrl"):
+            tabs.append((url, meta["webSocketDebuggerUrl"], meta.get("id", "")))
+        await asyncio.sleep(0.12)  # gentle tab-creation stagger
+    if not tabs:
+        return {}
 
-    # Fallback: og:description meta tags ("1,234 Followers, 567 Following, 89 Posts").
-    def _og(prop):
-        m = re.search(
-            rf'<meta property="og:{prop}" content="([^"]*)"', html
-        )
-        return m.group(1) if m else ""
+    async def _render_tab(target: str, tab_ws: str, tab_id: str) -> tuple:
+        try:
+            async with websockets.connect(tab_ws, max_size=64 * 1024 * 1024) as ws:
+                await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+                await ws.send(json.dumps({
+                    "id": 2, "method": "Page.navigate", "params": {"url": target},
+                }))
+                # Drain frames until the navigate ack arrives.
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                    if msg.get("id") == 2:
+                        break
+                await asyncio.sleep(max(0.5, settle_ms / 1000))
+                await ws.send(json.dumps({
+                    "id": 3, "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "document.documentElement.outerHTML",
+                        "returnByValue": True,
+                    },
+                }))
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+                    if msg.get("id") != 3:
+                        continue
+                    value = ((msg.get("result") or {}).get("result") or {}).get("value")
+                    return target, (value if isinstance(value, str) else "")
+                return target, ""
+        except Exception:
+            return target, ""
+        finally:
+            if tab_id:
+                await asyncio.to_thread(_http_json, f"/json/close/{tab_id}")
 
-    desc = _og("description")
+    rendered = await asyncio.gather(*(_render_tab(t, w, i) for t, w, i in tabs))
+    return {u: html for u, html in rendered if html}
+
+
+def _full_name_from_og_title(html: str, requested: str) -> str:
+    """og:title looks like 'Name (@handle) • Instagram photos and videos' —
+    extract the display name, fall back to a prettified handle."""
+    m = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+    title = m.group(1) if m else ""
+    title = re.sub(r"\s*•\s*Instagram.*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*\(@[^)]*\)\s*$", "", title).strip()
+    return _clean_str(title) or requested.replace("_", " ").replace(".", " ").title()
+
+
+def _stats_from_og_description(desc: str) -> Optional[Tuple[int, int, int]]:
+    """og:description text -> (followers, following, posts); None if unusable."""
     if not desc:
         return None
     # Numbers are often abbreviated for large accounts: "687M Followers",
@@ -1317,14 +1663,123 @@ def _extract_profile_from_html(html: str, requested: str) -> Optional[ProfileDat
             posts_count = _num(raw, suffix)
     if followers == 0:
         return None
-    title = _og("title")
-    # og:title looks like 'Name (@handle) • Instagram photos and videos'
-    title = re.sub(r"\s*•\s*Instagram.*$", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"\s*\(@[^)]*\)\s*$", "", title).strip()
+    return followers, following, posts_count
+
+
+def _profile_stats_from_og(html: str) -> Optional[Tuple[int, int, int]]:
+    """og:description meta tag -> (followers, following, posts).
+
+    REAL numbers Instagram itself publishes, but abbreviated for big
+    accounts ("104M Followers, 91 Following, 18K Posts") — so these are
+    only used as a floor/backfill for stats the precise GraphQL blob did
+    not carry. Returns None when the page exposes no usable description."""
+    m = re.search(r'<meta property="og:description" content="([^"]*)"', html)
+    desc = m.group(1) if m else ""
+    return _stats_from_og_description(desc)
+
+
+def _extract_profile_from_html(html: str, requested: str) -> Optional[ProfileData]:
+    """Parse a instagram.com/<handle>/ page into a profile.
+
+    Three tiers, most-precise first:
+      1. Embedded GraphQL Relay JSON blob (xdt shape): EXACT counts —
+         follower_count 104351749 where og-tags only show "104M".
+      2. Embedded legacy page_data JSON (edge_followed_by shape).
+      3. og:description meta tags — real stats but approximate for big
+         accounts.
+    Returns None when nothing usable is found."""
+    if not html:
+        return None
+
+    # Preferred: embedded JSON with the full user object.
+    #
+    # Two shapes appear in the wild:
+    #   - legacy web_profile_info / page_data: user has edge_followed_by etc.
+    #   - modern GraphQL Relay prefetch (xdt): user carries flat scalar stats
+    #     (follower_count, following_count, all_media_count) and NO edge_*
+    #     wrappers — that is the blob with EXACT counts for big accounts
+    #     (og-tags only show "104M Followers").
+    og_cache: Optional[Tuple[int, int, int]] = None
+    best: Optional[ProfileData] = None
+    best_exact = -1
+    for m in re.finditer(r'<script type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            continue
+
+        candidates: List[Dict[str, Any]] = []
+
+        def _find_user(obj):
+            if isinstance(obj, dict):
+                has_legacy = "edge_followed_by" in obj
+                has_modern = ("follower_count" in obj and "username" in obj
+                              and obj.get("username"))
+                if has_legacy or has_modern:
+                    candidates.append(obj)
+                for v in obj.values():
+                    _find_user(v)
+            elif isinstance(obj, list):
+                for v in obj:
+                    _find_user(v)
+            return None
+
+        _find_user(data)
+        if not candidates:
+            continue
+
+        # Prefer the candidate whose username matches the handle — profile
+        # pages embed other accounts' user objects (tagged users, suggested
+        # accounts) whose stats would poison the result.
+        want = requested.strip().lstrip("@").lower()
+        candidates.sort(
+            key=lambda u: (
+                str(u.get("username") or "").lower() != want,
+                -_to_int(u.get("follower_count")
+                         or _dig(u, "edge_followed_by.count")),
+            )
+        )
+        for user in candidates:
+            try:
+                profile = _map_direct_user(user, requested)
+            except Exception:
+                continue
+            # Count how many key stats came from precise sources (non-zero).
+            exact = (
+                (profile.followers > 0) + (profile.following > 0)
+                + (profile.posts_count > 0) + bool(profile.bio)
+            )
+            if exact > best_exact:
+                best, best_exact = profile, exact
+        if best is not None and best.followers > 0:
+            break
+
+    if best is not None:
+        # og-tags round big numbers ("104M Followers"); the GraphQL blob has
+        # exact ones. Use og only to fill stats the blob did not carry (its
+        # all_media_count can be null, e.g. when the grid is lazy-loaded).
+        if best.followers == 0 or best.posts_count == 0:
+            if og_cache is None:
+                og_cache = _profile_stats_from_og(html)
+            if og_cache is not None:
+                o_f, o_fo, o_p = og_cache
+                if best.followers == 0:
+                    best.followers = o_f
+                if best.following == 0:
+                    best.following = o_fo
+                if best.posts_count == 0:
+                    best.posts_count = o_p
+        return best
+
+    # Last resort: og:description meta tags — real stats but APPROXIMATE for
+    # big accounts ("104M Followers"), kept only as the floor.
+    og = _profile_stats_from_og(html)
+    if og is None:
+        return None
+    followers, following, posts_count = og
     return ProfileData(
         username=requested.lower(),
-        full_name=_clean_str(title)
-        or requested.replace("_", " ").replace(".", " ").title(),
+        full_name=_full_name_from_og_title(html, requested),
         bio="",
         followers=followers,
         following=following,
@@ -1435,7 +1890,7 @@ async def _enrich_with_graphql_feed(profile: ProfileData, user_id: str) -> Profi
         return profile
     try:
         payload = await asyncio.wait_for(
-            asyncio.to_thread(_gql_feed_sync, user_id, 12), timeout=35
+            asyncio.to_thread(_gql_feed_sync, user_id, 12), timeout=12
         )
         if payload:
             posts = _parse_graphql_feed(payload, profile.username)
@@ -1491,8 +1946,12 @@ def _extract_permalinks(dom: str, limit: int = 12) -> List[tuple]:
     pairs in page order (newest first)."""
     out: List[tuple] = []
     seen: set = set()
+    # Grid anchors come in two shapes: username-prefixed ("/nasa/p/CODE/")
+    # and the canonical usernameless form ("/p/CODE/"). Both are accepted —
+    # usernameless links cannot be attributed to a specific account, but on
+    # a rendered profile page the canonical form is that profile's post.
     for m in re.finditer(
-        r'href="/[A-Za-z0-9._]+/(p|reel)/([A-Za-z0-9_-]{5,})/?[^"]*"', dom
+        r'href="(?:/[A-Za-z0-9._]+)?/(p|reel)/([A-Za-z0-9_-]{5,})/?[^"]*"', dom
     ):  # optional trailing slash / query params before the closing quote
         kind, code = m.group(1), m.group(2)
         if code in seen:
@@ -1566,7 +2025,10 @@ async def _enrich_with_permalink_posts(
         if seq and time.monotonic() >= deadline_ts:
             return None
         if seq:
-            await asyncio.sleep(0.3 * seq)  # gentle stagger, not full serialization
+            # Tiny stagger only — with isolated per-render profile dirs the
+            # launches no longer collide, so the old 0.3s-per-item pacing
+            # (3.3s before the last post even started) is pure latency.
+            await asyncio.sleep(min(0.08 * seq, 0.6))
         url = f"https://www.instagram.com/{'reel' if kind == 'reel' else 'p'}/{code}/"
         try:
             async with _permalink_semaphore:
@@ -1579,6 +2041,40 @@ async def _enrich_with_permalink_posts(
         except (asyncio.TimeoutError, Exception):
             return None  # one bad post must not block the rest
 
+    # Preferred: one shared browser, every permalink in its own parallel tab
+    # (no per-post process start — the whole batch loads at once). The
+    # per-post process renderer below tops up whatever the shared pass missed.
+    urls = [
+        f"https://www.instagram.com/{'reel' if kind == 'reel' else 'p'}/{code}/"
+        for code, kind in targets
+    ]
+    try:
+        batch = await asyncio.wait_for(
+            _cdp_render_many(urls, settle_ms=2500), timeout=60
+        )
+    except (asyncio.TimeoutError, Exception):
+        batch = {}
+    if batch:
+        posts: List[Post] = []
+        missing: List[tuple] = []
+        for (code, kind), url in zip(targets, urls):
+            html = batch.get(url)
+            p = _parse_post_permalink_dom(html, code, kind) if html else None
+            if p is not None:
+                posts.append(p)
+            else:
+                missing.append((code, kind))
+        if missing:
+            rendered = await asyncio.gather(
+                *(_render_one(0, code, kind) for code, kind in missing)
+            )
+            posts.extend(p for p in rendered if p is not None)
+        if posts:
+            profile.recent_posts = posts
+        return profile
+
+    # Shared browser unavailable (no debuggee/websockets) — legacy path:
+    # per-post headless processes, bounded by the permalink semaphore.
     rendered = await asyncio.gather(
         *(_render_one(i, code, kind) for i, (code, kind) in enumerate(targets))
     )
@@ -1607,7 +2103,7 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
     Best-effort and bounded: IG_LIKE_BACKFILL env caps the total seconds
     spent (0 disables); per-post failure leaves the post untouched. Every
     number written comes from Instagram's own permalink metadata."""
-    budget = float(os.getenv("IG_LIKE_BACKFILL", "75"))
+    budget = float(os.getenv("IG_LIKE_BACKFILL", "45"))
     if budget <= 0 or profile is None or not profile.recent_posts:
         return profile
 
@@ -1636,6 +2132,23 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
     if not suspects:
         return profile
 
+    def _merge_permalink(post: Post, p: Post) -> None:
+        if p.likes > 0 and post.likes == 0:
+            post.likes = p.likes
+        # A comment-suspect post (source omitted comment_count) gets the
+        # permalink's REAL count — including a genuine 0 — and the
+        # suspect flag is cleared either way. This is the path that used
+        # to be skipped when likes were already present, leaving real
+        # comments at 0 for accounts fetched via the xdt feed.
+        if getattr(post, "comment_count_omitted", False):
+            post.comments = p.comments  # real value, even when it is 0
+            post.comment_count_omitted = False
+        if not post.caption and p.caption:
+            post.caption = p.caption
+        if not post.posted_at and p.posted_at:
+            post.posted_at = p.posted_at
+            post.posted_days_ago = p.posted_days_ago
+
     async def _fix_one(post: Post) -> None:
         url = f"https://www.instagram.com/{'reel' if post.media_type == 'reel' else 'p'}/{post.id}/"
         try:
@@ -1648,23 +2161,34 @@ async def _backfill_missing_likes(profile: ProfileData) -> ProfileData:
             p = _parse_post_permalink_dom(dom, post.id, post.media_type)
             if p is None:
                 return
-            if p.likes > 0 and post.likes == 0:
-                post.likes = p.likes
-            # A comment-suspect post (source omitted comment_count) gets the
-            # permalink's REAL count — including a genuine 0 — and the
-            # suspect flag is cleared either way. This is the path that used
-            # to be skipped when likes were already present, leaving real
-            # comments at 0 for accounts fetched via the xdt feed.
-            if getattr(post, "comment_count_omitted", False):
-                post.comments = p.comments  # real value, even when it is 0
-                post.comment_count_omitted = False
-            if not post.caption and p.caption:
-                post.caption = p.caption
-            if not post.posted_at and p.posted_at:
-                post.posted_at = p.posted_at
-                post.posted_days_ago = p.posted_days_ago
+            _merge_permalink(post, p)
         except (asyncio.TimeoutError, Exception):
             return  # one bad render must not block the rest
+
+    # Preferred batch path: one shared browser renders every suspect's
+    # permalink in parallel tabs (~one page-load instead of N process starts).
+    urls_map = {
+        post.id: f"https://www.instagram.com/{'reel' if post.media_type == 'reel' else 'p'}/{post.id}/"
+        for post in suspects
+    }
+    try:
+        batch = await asyncio.wait_for(
+            _cdp_render_many(list(urls_map.values()), settle_ms=2500), timeout=45
+        )
+    except (asyncio.TimeoutError, Exception):
+        batch = {}
+    if batch:
+        remaining: List[Post] = []
+        for post in suspects:
+            html = batch.get(urls_map[post.id])
+            p = _parse_post_permalink_dom(html, post.id, post.media_type) if html else None
+            if p is not None:
+                _merge_permalink(post, p)
+            else:
+                remaining.append(post)
+        if not remaining:
+            return profile
+        suspects = remaining  # top up the misses via per-post processes
 
     # Renders are independent tiny pages — run them concurrently (bounded by
     # the permalink semaphore) instead of ~8s one-by-one.
@@ -1681,17 +2205,136 @@ def _extract_profile_from_dom(html: str, requested: str) -> Optional[ProfileData
     return _extract_profile_from_html(html, requested)
 
 
+async def _gql_relay_salvage(_rpc, uname: str) -> Optional[ProfileData]:
+    """Salvage EXACT GraphQL profile data from the tab's rendered page.
+
+    When Instagram hard-blocks the logged-out GraphQL endpoints ("Unauthorized
+    logged out query" / "Please wait a few minutes"), its own frontend has
+    STILL just received the precise profile payload for the page render —
+    shipped inside the Relay prefetch <script type="application/json">
+    blobs. Those carry exact counts (follower_count 104351749) where the
+    og-tags only show "104M", plus is_verified. This harvests them from the
+    live DOM over the same CDP session, then fills per-post engagement via
+    the permalink renderer. Real GraphQL data, zero extra API calls."""
+    JS_EXTRACT = r"""
+(() => {
+  const blobs = Array.from(document.querySelectorAll('script[type="application/json"]'))
+    .map(s => s.textContent || '')
+    .filter(t => t.indexOf('follower_count') !== -1 || t.indexOf('edge_followed_by') !== -1);
+  const wantRe = new RegExp('^/' + __UNAME_JSON__ + '/(p|reel)/');
+  const anyPostRe = /\/(p|reel)\/[A-Za-z0-9_-]{5,}\//;
+  const hrefs = Array.from(document.querySelectorAll('a[href]'))
+    .map(a => a.getAttribute('href') || '')
+    .filter(h => wantRe.test(h) || /^\/(p|reel)\//.test(h))
+    .filter(h => anyPostRe.test(h));
+  const ogEl = document.querySelector('meta[property="og:description"]');
+  return {blobs: blobs, hrefs: hrefs.slice(0, 60),
+          og: ogEl ? (ogEl.getAttribute('content') || '') : ''};
+})()
+""".replace("__UNAME_JSON__", json.dumps(uname))
+    try:
+        ev = await _rpc("Runtime.evaluate", {
+            "expression": JS_EXTRACT, "returnByValue": True, "timeout": 15000,
+        })
+        if ev.get("exceptionDetails"):
+            return None
+        payload = ((ev.get("result") or {}).get("result") or {}).get("value")
+        if not isinstance(payload, dict):
+            return None
+        want = (uname or "").lower()
+        best: Optional[ProfileData] = None
+        best_exact = -1
+        for text in payload.get("blobs", []):
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            candidates: List[Dict[str, Any]] = []
+
+            def _find(obj):
+                if isinstance(obj, dict):
+                    if obj.get("username") and (
+                        "follower_count" in obj or "edge_followed_by" in obj
+                    ):
+                        candidates.append(obj)
+                    for v in obj.values():
+                        _find(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        _find(v)
+
+            _find(data)
+            # The requested profile first; other embedded accounts (tagged
+            # users, suggestions) must not win.
+            candidates.sort(
+                key=lambda u: str(u.get("username") or "").lower() != want
+            )
+            for u in candidates[:2]:
+                try:
+                    p = _map_direct_user(u, uname)
+                except Exception:
+                    continue
+                exact = (
+                    (p.followers > 0) + (p.following > 0)
+                    + (p.posts_count > 0) + bool(p.bio)
+                )
+                if exact > best_exact:
+                    best, best_exact = p, exact
+        if best is None or best.followers <= 0:
+            return None
+        # The Relay blob's all_media_count is often null (lazy-loaded grid):
+        # backfill any zero stats from the og:description, which carries the
+        # real (if abbreviated) totals Instagram publishes for the page.
+        og_desc = str(payload.get("og") or "")
+        if og_desc and (best.posts_count == 0 or best.following == 0):
+            og_stats = _stats_from_og_description(og_desc)
+            if og_stats:
+                if best.posts_count == 0:
+                    best.posts_count = og_stats[2]
+                if best.following == 0:
+                    best.following = og_stats[1]
+        # Fill per-post engagement from the permalinks visible in the same
+        # page — best-effort; stats-only is still a valid precise result.
+        hrefs = payload.get("hrefs") or []
+        if hrefs:
+            parts = [f'href="{str(h).split("?")[0]}"' for h in hrefs]
+            try:
+                deadline = time.monotonic() + 210
+                best = await _enrich_with_permalink_posts(
+                    best, " ".join(parts), deadline
+                )
+            except Exception:
+                pass  # keep the stats-only salvage
+        print(f"[gql] relay salvage for @{uname}: followers={best.followers} "
+              f"posts={len(best.recent_posts)}")
+        return best
+    except Exception:
+        return None
+
+
 async def _fetch_graphql_profile(username: str) -> Optional[ProfileData]:
-    """GraphQL provider: harvest the profile data from the REAL GraphQL
-    responses Instagram's own web app receives while loading the profile
-    page. Captured via the Chrome DevTools protocol (Network.enable +
-    Network.getResponseBody) — no doc_id to guess or maintain, no synthetic
-    request of our own: whatever Instagram's frontend genuinely gets, we
-    read. Handles both legacy edge_owner_to_timeline_media and modern
-    xdt_api__v1__feed__user_timeline_graphql_connection shapes.
+    """GraphQL provider: fetch the profile with Instagram's OWN GraphQL API,
+    executed FROM INSIDE a real instagram.com tab over the Chrome DevTools
+    protocol.
+
+    Plain-HTTP calls to the same endpoints get rejected ("Unauthorized
+    logged out query" / "Please wait a few minutes") because they lack a
+    real browser TLS + header fingerprint. Running the queries from inside
+    the page uses the browser's own fingerprint, cookies and origin — the
+    same context Instagram's frontend uses — so the requests look fully
+    legitimate to Instagram's edge.
+
+    Two queries are tried in order and the first usable user object wins:
+      1. GET  /api/v1/users/web_profile_info/?username=<handle>  — precise
+         follower/following/post counts + the 12 latest media edges.
+      2. POST /api/graphql with a persisted profile-query doc_id — fallback;
+         Instagram rotates doc_ids, so override via IG_GQL_DOC_ID when the
+         built-in one stops resolving.
+    Both shapes are mapped (legacy edge_owner_to_timeline_media and modern
+    xdt_api__v1__feed__user_timeline_graphql_connection) via _map_direct_user.
 
     Returns None (caller falls through to other providers) when Chrome/
-    websockets are unavailable or no profile payload was captured."""
+    websockets are unavailable or both in-page queries are blocked/empty."""
     if os.getenv("IG_GQL_BROWSER", "true").lower() not in ("1", "true", "yes"):
         return None
     try:
@@ -1702,117 +2345,125 @@ async def _fetch_graphql_profile(username: str) -> Optional[ProfileData]:
     if not ws_url:
         return None
 
-    async def _rpc(ws, mid, method, params=None):
-        await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
-        while True:
-            msg = json.loads(await ws.recv())
-            if msg.get("id") == mid:
-                return msg
+    uname = (username or "").strip().lstrip("@").lower()
+    page_url = f"https://www.instagram.com/{uname}/"
+    GQL_DOC_ID = os.getenv("IG_GQL_DOC_ID", "9510064595728286")
 
-    async def _drain_until(ws, deadline, want):
-        """Read websocket frames until a Network.responseReceived for a
-        GraphQL/profile URL arrives or the deadline passes. Returns the
-        requestId of the matched response, else None."""
-        while time.monotonic() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - time.monotonic()))
-            except asyncio.TimeoutError:
-                return None
-            except Exception:
-                return None
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                continue
-            params = msg.get("params") or {}
-            resp = params.get("response") or {}
-            url = str(resp.get("url") or "")
-            if not any(w in url for w in want):
-                continue
-            return params.get("requestId")
-        return None
-
-    url = f"https://www.instagram.com/{username}/"
-    # Instagram's web app calls /api/graphql (POST) for profile data. Match
-    # any graphql-ish URL — endpoint names drift, the shape does not.
-    want = ("graphql", "web_profile_info", "feed/user")
-
-    def _user_from_payload(payload):
-        """Extract the profile user object from a captured response body."""
-        if not isinstance(payload, dict):
-            return None
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        user = data.get("user") if isinstance(data, dict) else None
-        if isinstance(user, dict) and (user.get("username") or user.get("id")):
-            return user
-        return None
+    # Runs inside the page: same-origin fetch with the tab's own cookies and
+    # fingerprint. Tries web_profile_info (precise), then the persisted
+    # doc_id POST. Returns {queries: [...], via: str, user: {...}} — user is
+    # present only when a query actually yielded a profile object.
+    JS = """
+(async () => {
+  const out = {queries: []};
+  const APP_ID = '936619743392459';
+  const pick = (j) => {
+    const d = j && typeof j === 'object' ? (j.data && typeof j.data === 'object' ? j.data : j) : null;
+    if (!d) return null;
+    let u = typeof d.user === 'object' ? d.user : null;
+    if (!u && typeof d.xdt_api__v1__user === 'object') u = d.xdt_api__v1__user;
+    if (u && (u.username || u.id || u.pk)) return u;
+    return null;
+  };
+  const blocked = (j) => {
+    if (!j || typeof j !== 'object') return false;
+    const msg = String(j.message || '');
+    if (msg.toLowerCase().includes('wait a few minutes')) return true;
+    if (j.require_login === true) return true;
+    if (JSON.stringify(j.errors || '').includes('Unauthorized logged out query')) return true;
+    return false;
+  };
+  try {
+    const r1 = await fetch('/api/v1/users/web_profile_info/?username=__HANDLE__', {
+      headers: {'x-ig-app-id': APP_ID, 'accept': '*/*'}, credentials: 'include'});
+    const j1 = await r1.json();
+    out.queries.push({q: 'web_profile_info', status: r1.status, blocked: blocked(j1)});
+    const u1 = pick(j1);
+    if (u1) { out.user = u1; out.via = 'web_profile_info'; return out; }
+  } catch (e1) { out.queries.push({q: 'web_profile_info', error: String(e1).slice(0, 120)}); }
+  try {
+    const lsdEl = document.querySelector('input[name="lsd"]');
+    const lsd = (lsdEl && lsdEl.value) || window.__igLsd || '';
+    const body = new URLSearchParams({
+      variables: JSON.stringify({username: '__HANDLE__', include_reel: true}),
+      doc_id: '__DOC_ID__'});
+    const r2 = await fetch('/api/graphql', {method: 'POST',
+      headers: {'content-type': 'application/x-www-form-urlencoded',
+                'x-ig-app-id': APP_ID, 'x-fb-lsd': lsd},
+      body: body.toString(), credentials: 'include'});
+    const j2 = await r2.json();
+    out.queries.push({q: 'graphql doc_id', status: r2.status, blocked: blocked(j2)});
+    const u2 = pick(j2);
+    if (u2) { out.user = u2; out.via = 'graphql doc_id'; return out; }
+  } catch (e2) { out.queries.push({q: 'graphql doc_id', error: String(e2).slice(0, 120)}); }
+  return out;
+})()
+""".replace("__HANDLE__", uname).replace("__DOC_ID__", GQL_DOC_ID)
 
     try:
         async with websockets.connect(ws_url, max_size=256 * 1024 * 1024) as ws:
-            await _rpc(ws, 1, "Runtime.enable")
-            await _rpc(ws, 2, "Network.enable", {"maxPostDataSize": 65536})
-            # Fresh navigation so the page's own data requests happen now,
-            # inside our capture window.
-            await _rpc(ws, 3, "Page.navigate", {"url": url})
-            # Collect ALL graphql-ish responses in the window, scanning each
-            # body as it arrives. If Instagram answers with its logged-out
-            # rejection, bail fast — waiting longer cannot help.
-            deadline = time.monotonic() + 15
-            candidate_ids: list = []
-            unauthorized_bodies = 0
-            profile = None
-            while time.monotonic() < deadline and profile is None:
-                try:
-                    raw = await asyncio.wait_for(
-                        ws.recv(), timeout=max(0.1, deadline - time.monotonic())
-                    )
-                except asyncio.TimeoutError:
-                    break
-                except Exception:
-                    break
-                try:
-                    msg = json.loads(raw)
-                except Exception:
-                    continue
-                if msg.get("method") != "Network.responseReceived":
-                    continue
-                params = msg.get("params") or {}
-                resp = params.get("response") or {}
-                if not any(w in str(resp.get("url") or "") for w in want):
-                    continue
-                req_id = params.get("requestId")
-                try:
-                    body_msg = await _rpc(ws, 100 + len(candidate_ids), "Network.getResponseBody", {"requestId": req_id})
-                except Exception:
-                    continue
-                body = (body_msg.get("result") or {}).get("body") or ""
-                if not body:
-                    continue
-                if "Unauthorized logged out query" in body or "login_required" in body:
-                    unauthorized_bodies += 1
-                    if unauthorized_bodies >= 2:
-                        break  # logged-out GraphQL is blocked — abort early
-                    continue
-                candidate_ids.append(req_id)
-                payload = None
-                try:
-                    payload = json.loads(body)
-                except Exception:
-                    for chunk in body.split("\n"):
-                        chunk = chunk.strip()
-                        if chunk.startswith("{"):
-                            try:
-                                payload = json.loads(chunk)
-                                break
-                            except Exception:
-                                continue
-                user = _user_from_payload(payload)
-                if user is not None:
-                    profile = _map_direct_user(user, username)
-            if profile is None:
+            mid = 0
+
+            async def _rpc(method, params=None):
+                nonlocal mid
+                mid += 1
+                await ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") == mid:
+                        return msg
+
+            await _rpc("Runtime.enable")
+            # Fresh navigation onto the profile URL itself: the tab then owns
+            # the right origin/cookies, so same-origin fetches ride the page's
+            # own (logged-out but real) session context.
+            nav = await _rpc("Page.navigate", {"url": page_url})
+            if (nav.get("result") or {}).get("errorText"):
+                print(f"[gql] navigation failed for @{uname}: "
+                      f"{(nav.get('result') or {}).get('errorText')}")
                 return None
+            await asyncio.sleep(4.5)  # let the page settle (cookies, JS context)
+
+            ev = await _rpc("Runtime.evaluate", {
+                "expression": JS,
+                "returnByValue": True,
+                "awaitPromise": True,
+                "timeout": 25000,
+            })
+            if ev.get("exceptionDetails"):
+                try:
+                    print(f"[gql] in-page JS exception for @{uname}: "
+                          f"{json.dumps(ev['exceptionDetails'])[:300]}")
+                except Exception:
+                    pass
+                return None
+            result = (ev.get("result") or {}).get("result") or {}
+            if result.get("subtype") == "error":
+                print(f"[gql] in-page JS error for @{uname}: {str(result.get('description'))[:200]}")
+                return None
+            payload = result.get("value")
+            if not isinstance(payload, dict):
+                return None
+            user = payload.get("user")
+            if not isinstance(user, dict):
+                # Both in-page queries were blocked or empty (Instagram
+                # hard-blocks logged-out GraphQL for profiles on many IPs).
+                # Surface the per-query outcome for diagnosis, then SALVAGE:
+                # this same tab has rendered the profile page, and its
+                # embedded GraphQL Relay prefetch blob carries the EXACT
+                # stats (follower_count 104351749 where og-tags only show
+                # "104M") — real GraphQL data Instagram shipped to its own
+                # frontend, no API call needed.
+                try:
+                    print(f"[gql] in-page fetch for @{uname}: "
+                          f"{json.dumps(payload.get('queries', []))[:300]}")
+                except Exception:
+                    pass
+                return await _gql_relay_salvage(_rpc, uname)
+            profile = _map_direct_user(user, uname)
             if profile.followers == 0 and not profile.recent_posts:
                 return None
+            print(f"[gql] in-page GraphQL OK for @{uname} via {payload.get('via')}")
             return profile
     except Exception:
         return None
@@ -1828,7 +2479,38 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
 
     Raises ValueError when the handle genuinely doesn't exist, RuntimeError
     when Instagram blocks/rate-limits every attempt."""
+    perf = _Perf(f"direct @{username}")
+    global _api_block_until
+    # Recently blocked (401/403/429)? Skip the doomed API call entirely —
+    # the Chrome render below is the real data path on this IP.
+    if time.monotonic() < _api_block_until:
+        perf.stage("skip web_profile_info (API blocked recently)")
+        raise RuntimeError(
+            "Instagram API endpoints are rate-limiting this IP (recent block) — "
+            "serving via the rendered-page path instead."
+        )
+    # Headless-Chrome profile render starts IMMEDIATELY, in parallel with the
+    # HTTP ladder below. On this IP the API endpoints answer 401 within a
+    # couple of seconds and the real data comes from the rendered page —
+    # launching Chrome only after the HTTP ladder gave up made every cold
+    # fetch pay the full ~12s render on top of the doomed attempts. The task
+    # is cancelled when an earlier provider already produced full data.
+    chrome_task: Optional[asyncio.Task] = None
+    if os.getenv("IG_CHROME_FETCH", "true").lower() in ("1", "true", "yes"):
+        chrome_task = asyncio.create_task(
+            asyncio.to_thread(
+                _chrome_dump_sync, f"https://www.instagram.com/{username}/"
+            )
+        )
+
+    def _chrome_no_longer_needed() -> None:
+        if chrome_task is not None and not chrome_task.done():
+            chrome_task.cancel()  # result would be discarded — stop paying
+
     cookies, lsd = await asyncio.to_thread(_bootstrap_direct_session)
+
+    def _api_blocked() -> bool:
+        return "throttled" in last_err
 
     headers = dict(_DIRECT_HEADERS)
     if lsd:
@@ -1858,6 +2540,9 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
             last_status = resp.status_code
             if resp.status_code in (401, 403, 429):
                 last_err = f"throttled (HTTP {resp.status_code})"
+                # Remember the block so later fetches skip this doomed call
+                # (and its latency) for a cooldown window.
+                _api_block_until = time.monotonic() + _API_BLOCK_COOLDOWN
                 continue  # rate-limited/blocked — fall through to HTML mode
             resp.raise_for_status()
             try:
@@ -1880,7 +2565,11 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
                 )
             # Likes hidden by Instagram (or stripped by xdt nodes) get real
             # values from the posts' permalink pages before caching.
-            return await _backfill_missing_likes(profile)
+            perf.stage("web_profile_info OK")
+            result = await _backfill_missing_likes(profile)
+            perf.stage("backfill done")
+            _chrome_no_longer_needed()
+            return result
 
     # Fallback 1: plain-HTML profile page via HTTP (fast, when it works).
     html_floor: Optional[ProfileData] = None  # real stats, no posts
@@ -1896,7 +2585,10 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
         if resp.status_code == 200:
             profile = _extract_profile_from_html(resp.text, username)
             if profile is not None and profile.recent_posts:
-                return await _backfill_missing_likes(profile)  # full data — done
+                perf.stage("HTML floor has posts")
+                result = await _backfill_missing_likes(profile)  # full data — done
+                _chrome_no_longer_needed()
+                return result
             if profile is not None:
                 html_floor = profile  # real stats, no posts — keep as floor
             last_err = f"{last_err}; HTML page had no parseable profile data"
@@ -1909,23 +2601,26 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     # fingerprint gets the full page where plain HTTP clients get a shell.
     # Runs even when Fallback 1 yielded stats-only data, because enrichment
     # (GraphQL feed / permalink posts) needs the rendered DOM.
-    if os.getenv("IG_CHROME_FETCH", "true").lower() in ("1", "true", "yes"):
+    if chrome_task is not None:
         try:
-            async with _chrome_semaphore:
-                dom = await asyncio.wait_for(
-                    asyncio.to_thread(_chrome_dump_sync, f"https://www.instagram.com/{username}/"),
-                    timeout=60,
-                )
+            # The render was prelaunched at the top of this function — it is
+            # almost certainly already finished by the time the HTTP ladder
+            # gave up, so this await returns instantly.
+            dom = await asyncio.wait_for(chrome_task, timeout=60)
             if dom:
+                perf.stage("chrome render done")
                 profile = _extract_profile_from_dom(dom, username)
                 if profile is not None:
                     # Stats-only results (og-tag parse) get their real
                     # per-post engagement from the classic GraphQL feed
-                    # query — best-effort, profile still returns without it.
+                    # query — but ONLY when the plain-HTTP API did not just
+                    # answer 401/403/429 for this IP: that query rides the
+                    # same fingerprint and would burn its whole timeout
+                    # before failing. The permalink renderer always works.
                     deadline = time.monotonic() + 210  # cap total enrichment time
                     if not profile.recent_posts:
                         user_id = _extract_user_id(dom)
-                        if user_id:
+                        if user_id and not _api_blocked():
                             profile = await _enrich_with_graphql_feed(profile, user_id)
                     # Still stats-only (GraphQL throttled)? Render the post
                     # permalinks instead — works even when the API is blocked.
@@ -2464,6 +3159,27 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     if not still_missing:
         return result
 
+    # Provider #0 — official Graph API for every still-missing handle.
+    # Per-handle failures (incl. non-professional accounts) are skipped and
+    # surface as the batch's usual missing-key warnings; token failures fall
+    # through to the existing providers.
+    if DATA_MODE == "live" and _has_graph_credentials():
+        for i, u in enumerate(still_missing):
+            if i:
+                await asyncio.sleep(0.5)  # pace app-level rate limits
+            try:
+                profile = await fetch_live_profile(u)
+            except (ValueError, RuntimeError, httpx.HTTPError) as e:
+                print(f"[graph] batch fetch failed for @{u}: {e}")
+                continue
+            await asyncio.to_thread(_disk_profile_set, u, profile)
+            async with _CACHE_LOCK:
+                _profile_cache[u] = (time.monotonic(), profile)
+            result[u] = profile
+        still_missing = [u for u in still_missing if u not in result]
+        if not still_missing:
+            return result
+
     # Non-live modes: unknown handles fall back to stale REAL data, then
     # deterministic simulated data (badged via data_age_hours = -1) so
     # pipelines never hard-fail.
@@ -2599,6 +3315,68 @@ async def get_profile(username: str) -> ProfileData:
         async with _CACHE_LOCK:
             _profile_cache[username] = (time.monotonic(), disk)
         return disk
+
+    # Stale-while-revalidate: an expired cached profile within 48h PAST its
+    # TTL serves INSTANTLY (real data, age-badged) while a background task
+    # refreshes it from a live provider. The user stops waiting on cold
+    # fetches for handles seen recently; the cache self-heals.
+    if DATA_MODE == "live" and (APIFY_TOKENS or DIRECT_FETCH_ENABLED or _has_graph_credentials()):
+        stale = await asyncio.to_thread(_disk_profile_get_any, username)
+        _swr_window_h = (_DISK_TTL_PROFILE / 3600) + 48
+        if stale is not None and (stale.data_age_hours or 0) <= _swr_window_h:
+            async with _CACHE_LOCK:
+                _profile_cache[username] = (time.monotonic(), stale)
+            if username not in _refresh_inflight:
+                _refresh_inflight.add(username)
+
+                async def _bg_refresh() -> None:
+                    try:
+                        fresh = None
+                        if _has_graph_credentials():
+                            try:
+                                fresh = await fetch_live_profile(username)
+                            except (ValueError, RuntimeError, httpx.HTTPError):
+                                fresh = None
+                        if fresh is None and APIFY_TOKENS:
+                            try:
+                                fresh = await _fetch_live_profile(username)
+                            except (RuntimeError, httpx.HTTPError):
+                                fresh = None
+                        if fresh is None and DIRECT_FETCH_ENABLED:
+                            try:
+                                fresh = await _fetch_direct_profile(username)
+                            except (ValueError, RuntimeError, httpx.HTTPError):
+                                fresh = None
+                        if fresh is not None and fresh.recent_posts:
+                            await asyncio.to_thread(_disk_profile_set, username, fresh)
+                            async with _CACHE_LOCK:
+                                _profile_cache[username] = (time.monotonic(), fresh)
+                    except Exception:
+                        pass  # background refresh must never crash the app
+                    finally:
+                        _refresh_inflight.discard(username)
+
+                asyncio.create_task(_bg_refresh())
+            return stale
+
+    # Layer 3 — Provider #0: OFFICIAL Instagram Graph API (business_discovery).
+    # ToS-compliant, no scraping. When credentials are configured this is the
+    # PREFERRED source. An unusable TARGET account (not found / private / not
+    # a professional account) raises ValueError immediately with a clear
+    # message; a TOKEN/app failure only logs and falls through to the next
+    # provider so one expired key never takes the app down.
+    if DATA_MODE == "live" and _has_graph_credentials():
+        try:
+            profile = await fetch_live_profile(username)
+        except ValueError:
+            raise  # honest, account-level error — surfaced to the user
+        except (RuntimeError, httpx.HTTPError) as e:
+            print(f"[graph] provider #0 failed for @{username}: {e}")
+        else:
+            await asyncio.to_thread(_disk_profile_set, username, profile)
+            async with _CACHE_LOCK:
+                _profile_cache[username] = (time.monotonic(), profile)
+            return profile
 
     live_capable = DATA_MODE == "live" and bool(APIFY_TOKENS)
     if live_capable:
