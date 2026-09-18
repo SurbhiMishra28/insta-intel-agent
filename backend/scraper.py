@@ -1242,6 +1242,31 @@ _DIRECT_HEADERS = {
     "origin": "https://www.instagram.com",
 }
 
+# Outbound proxy for the keyless Instagram layer (httpx clients + headless
+# Chrome). Cloud hosts (Render/Railway/Fly) get their datacenter IPs hard-
+# blocked by Instagram — 401/429 on every call — while the same code works
+# from residential IPs. Setting IG_PROXY_URL (e.g. a Webshare/IPRoyal
+# residential proxy) routes every Instagram request through it and restores
+# live fetching on those hosts. Leave unset locally.
+_IG_PROXY_URL = (os.getenv("IG_PROXY_URL") or "").strip() or None
+
+
+def _ig_httpx_proxy() -> Optional[str]:
+    """Proxy URL for httpx clients (httpx handles auth inside the URL).
+    Returns None when unset so clients behave exactly as before."""
+    return _IG_PROXY_URL
+
+
+def _chrome_proxy_flags() -> list:
+    """--proxy-server cannot carry credentials; route Chrome through the
+    proxy host when one is configured. IP-whitelisted proxies work fully
+    here; user:pass proxies work for the httpx layer only."""
+    if not _IG_PROXY_URL:
+        return []
+    host = _IG_PROXY_URL.split("//", 1)[-1].split("@", 1)[-1]
+    return [f"--proxy-server=http://{host}"]
+
+
 # Session bootstrap state (cookies + LSD token), refreshed periodically.
 _direct_session: Dict[str, Any] = {"cookies": None, "lsd": "", "ts": 0.0}
 _DIRECT_SESSION_TTL = 30 * 60  # seconds; re-seed cookies/LSD after this
@@ -1276,7 +1301,7 @@ def _bootstrap_direct_session() -> tuple:
         return _direct_session["cookies"], _direct_session["lsd"]
     try:
         jar = httpx.Cookies()
-        with httpx.Client(timeout=15, follow_redirects=True) as client:
+        with httpx.Client(timeout=15, follow_redirects=True, proxy=_ig_httpx_proxy()) as client:
             resp = client.get("https://www.instagram.com/", headers={
                 "user-agent": _DIRECT_HEADERS["user-agent"],
                 "accept-language": "en-US,en;q=0.9",
@@ -1412,7 +1437,7 @@ def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
         profile_dir = tempfile.mkdtemp(prefix="ig-render-")
         cmd = [
             chrome, "--headless=new", "--disable-gpu", "--no-first-run",
-            *_CHROME_CONTAINER_FLAGS,
+            *_CHROME_CONTAINER_FLAGS, *_chrome_proxy_flags(),
             "--no-default-browser-check", "--window-size=1280,2400",
             f"--user-agent={_DIRECT_HEADERS['user-agent']}",
             f"--virtual-time-budget={budget_ms}", "--dump-dom", url,
@@ -1489,7 +1514,7 @@ def _cdp_ws_url() -> Optional[str]:
                 f"--remote-debugging-port={_CDP_PORT}",
                 f"--user-data-dir={os.path.join(tempfile.gettempdir(), 'instaiq-chrome')}",
                 "--headless=new", "--disable-gpu", "--no-first-run",
-                *_CHROME_CONTAINER_FLAGS,
+                *_CHROME_CONTAINER_FLAGS, *_chrome_proxy_flags(),
                 "--no-default-browser-check", "--window-size=1280,2400",
                 f"--user-agent={_DIRECT_HEADERS['user-agent']}",
                 "https://www.instagram.com/",
@@ -1879,7 +1904,8 @@ def _gql_feed_sync(user_id: str, first: int = 12) -> Optional[Any]:
         if csrf:
             headers["x-csrftoken"] = csrf
         with httpx.Client(
-            timeout=_DIRECT_TIMEOUT, follow_redirects=True, cookies=cookies
+            timeout=_DIRECT_TIMEOUT, follow_redirects=True, cookies=cookies,
+            proxy=_ig_httpx_proxy(),
         ) as client:
             resp = client.get(
                 "https://www.instagram.com/graphql/query/",
@@ -2540,7 +2566,8 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     last_status = 0
     last_err = ""
     async with httpx.AsyncClient(
-        timeout=_DIRECT_TIMEOUT, follow_redirects=True, cookies=cookies
+        timeout=_DIRECT_TIMEOUT, follow_redirects=True, cookies=cookies,
+        proxy=_ig_httpx_proxy(),
     ) as client:
         for base in _DIRECT_HOSTS[:1]:  # www host only; i.instagram needs app auth
             try:
@@ -2589,7 +2616,10 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     # Fallback 1: plain-HTML profile page via HTTP (fast, when it works).
     html_floor: Optional[ProfileData] = None  # real stats, no posts
     try:
-        async with httpx.AsyncClient(timeout=_DIRECT_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=_DIRECT_TIMEOUT, follow_redirects=True,
+            proxy=_ig_httpx_proxy(),
+        ) as client:
             resp = await client.get(
                 f"https://www.instagram.com/{username}/",
                 headers={

@@ -7,6 +7,10 @@
 #   LLM_API_KEY   — NVIDIA NIM key (https://build.nvidia.com), nvapi-...
 # Optional:
 #   APIFY_TOKEN   — enables the Apify provider (keyless fallback works without)
+#   IG_PROXY_URL  — outbound proxy (http://user:pass@host:port) for the keyless
+#                   Instagram layer. Instagram blocks Render's datacenter IP
+#                   (401/429 on every call); a residential/mobile proxy URL
+#                   here restores live fetching. Leave unset locally.
 services:
   - type: web
     name: insta-intel-api
@@ -25,6 +29,8 @@ services:
         sync: false          # set in dashboard: NVIDIA NIM key
       - key: APIFY_TOKEN
         sync: false          # optional; keyless fallback works without it
+      - key: IG_PROXY_URL
+        sync: false          # optional; residential proxy for IG fetches
       - key: DATA_MODE
         value: live
       # Persistent cache DBs live on the mounted disk so restarts keep data.
