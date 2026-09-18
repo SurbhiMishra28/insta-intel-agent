@@ -1378,6 +1378,19 @@ def _find_chrome() -> Optional[str]:
     return None
 
 
+# Flags needed when Chrome runs inside a container: the official Docker
+# images run as root, and Chromium refuses --headless as root without
+# --no-sandbox (exit code 1, no rendering — the keyless data path silently
+# dies on hosts like Render). --disable-dev-shm-usage keeps tabs off the
+# tiny container /dev/shm that otherwise crashes them. Harmless locally.
+_CHROME_CONTAINER_FLAGS = [
+    flag for flag in (
+        "--no-sandbox" if os.path.exists("/.dockerenv") or os.getenv("RENDER") else "",
+        "--disable-dev-shm-usage" if os.path.exists("/.dockerenv") or os.getenv("RENDER") else "",
+    ) if flag
+]
+
+
 def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
     """Render a page in headless Chrome and return the final DOM (sync).
     Chrome's real browser fingerprint gets past Instagram's static-HTML
@@ -1399,6 +1412,7 @@ def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
         profile_dir = tempfile.mkdtemp(prefix="ig-render-")
         cmd = [
             chrome, "--headless=new", "--disable-gpu", "--no-first-run",
+            *_CHROME_CONTAINER_FLAGS,
             "--no-default-browser-check", "--window-size=1280,2400",
             f"--user-agent={_DIRECT_HEADERS['user-agent']}",
             f"--virtual-time-budget={budget_ms}", "--dump-dom", url,
@@ -1475,6 +1489,7 @@ def _cdp_ws_url() -> Optional[str]:
                 f"--remote-debugging-port={_CDP_PORT}",
                 f"--user-data-dir={os.path.join(tempfile.gettempdir(), 'instaiq-chrome')}",
                 "--headless=new", "--disable-gpu", "--no-first-run",
+                *_CHROME_CONTAINER_FLAGS,
                 "--no-default-browser-check", "--window-size=1280,2400",
                 f"--user-agent={_DIRECT_HEADERS['user-agent']}",
                 "https://www.instagram.com/",
