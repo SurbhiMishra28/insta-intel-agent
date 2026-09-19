@@ -11,19 +11,23 @@
 #                   Instagram layer. Instagram blocks Render's datacenter IP
 #                   (401/429 on every call); a residential/mobile proxy URL
 #                   here restores live fetching. Leave unset locally.
+#
+# Free-tier notes: the service spins down after ~15 min idle (cold start
+# adds ~60s to the first request) and the filesystem is ephemeral — the
+# profile cache and scan history reset on every redeploy. On a paid plan,
+# switch plan to `starter` and re-add a persistent disk plus the two DB
+# path env vars below to keep data across deploys:
+#   PROFILE_CACHE_DB=/app/data/profile_cache.db
+#   SCAN_HISTORY_DB=/app/data/scan_history.db
 services:
   - type: web
     name: insta-intel-api
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter
+    plan: free
     healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: insta-cache
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: LLM_API_KEY
         sync: false          # set in dashboard: NVIDIA NIM key
@@ -33,11 +37,6 @@ services:
         sync: false          # optional; residential proxy for IG fetches
       - key: DATA_MODE
         value: live
-      # Persistent cache DBs live on the mounted disk so restarts keep data.
-      - key: PROFILE_CACHE_DB
-        value: /app/data/profile_cache.db
-      - key: SCAN_HISTORY_DB
-        value: /app/data/scan_history.db
       # Headless Chrome (keyless fallback layer) tuning on a small container.
       - key: IG_CHROME_FETCH
         value: "true"
