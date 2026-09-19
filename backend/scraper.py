@@ -2757,12 +2757,15 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
         "x-requested-with": "XMLHttpRequest",
     }
     last = "no gateways configured"
+    token = os.getenv("IG_GATEWAY_TOKEN", "").strip()
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(25.0), follow_redirects=True
     ) as client:
         for tmpl in _GATEWAY_TEMPLATES:
             host = tmpl.split("/")[2]
             url = tmpl.format(q=quote(endpoint, safe=""))
+            if token and "?" in url:
+                url += "&token=" + quote(token, safe="")
             try:
                 resp = await client.get(url, headers=headers)
             except httpx.HTTPError as e:
