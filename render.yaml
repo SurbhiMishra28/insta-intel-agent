@@ -33,6 +33,8 @@ services:
         sync: false          # set in dashboard: NVIDIA NIM key
       - key: APIFY_TOKEN
         sync: false          # optional; keyless fallback works without it
+      - key: IG_GATEWAY_URLS
+        sync: false          # optional; comma-separated relay URLs for blocked-IP fallback
       - key: IG_PROXY_URL
         sync: false          # optional; residential proxy for IG fetches
       - key: DATA_MODE

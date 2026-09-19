@@ -2723,12 +2723,20 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
 # likes/comments. Zero credentials, zero login.
 # ---------------------------------------------------------------------------
 
-_GATEWAY_TEMPLATES = (
+# Public gateways are best-effort (they rate-limit/outage often). Set
+# IG_GATEWAY_URLS to a comma-separated list of YOUR OWN relay URLs — e.g. a
+# personal Cloudflare Worker CORS proxy (free, 100k req/day) — to make this
+# provider reliable in production. "{q}" = URL-encoded target; raw "{}"
+# passes the target unencoded (Cloudflare-worker style).
+_PUBLIC_GATEWAYS = (
     "https://api.allorigins.win/raw?url={q}",
     "https://corsproxy.io/?url={q}",
     "https://api.codetabs.com/v1/proxy?quest={q}",
     "https://r.jina.ai/{q}",
 )
+_GATEWAY_TEMPLATES = tuple(
+    t.strip() for t in os.getenv("IG_GATEWAY_URLS", "").split(",") if t.strip()
+) or _PUBLIC_GATEWAYS
 
 
 async def _fetch_gw_profile(username: str) -> ProfileData:
