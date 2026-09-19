@@ -22,6 +22,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 import ai_engine
 import analytics
+import intel
 import scraper
 import storage
 from typing import Optional
@@ -57,11 +58,14 @@ from pydantic import BaseModel, Field
 
 from models import (
     AnalyzeRequest,
+    AudienceAnalysis,
     ProfileData,
     CompareRequest,
     CompareResponse,
+    CompetitorContentAnalysis,
     CompetitorResearchResponse,
     DiscoveredCompetitor,
+    RivalGrowthResponse,
     GrowthPlanResponse,
     HashtagResearch,
     HashtagStat,
@@ -75,7 +79,10 @@ from models import (
     TrendAlert,
     TrendsResponse,
     TrendSuggestion,
+    TopContentResponse,
+    ViralHooksResponse,
     WhitespaceResponse,
+    TrendingTopicsResponse,
 )
 
 app = FastAPI(
@@ -797,6 +804,13 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
     except Exception:
         review = None
 
+    # --- Deep intel (additive; each section must never block the plan) ---
+    intel_bundle = None
+    try:
+        intel_bundle = intel.build_intel_bundle(main_insight, rivals)
+    except Exception:
+        intel_bundle = None
+
     return GrowthPlanResponse(
         main=main_insight,
         plan=plan,
@@ -813,6 +827,7 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
         trends_result=trend_response,
         review=review,
         history=history_records,
+        intel=intel_bundle,
     )
 
 
@@ -1049,6 +1064,91 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
             for a in alerts[:5]:
                 parts.append(f'<li><b>{_esc(getattr(a, "title", ""))}</b> — {_esc(getattr(a, "why", getattr(a, "description", "")))}</li>')
             parts.append('</ul>')
+
+    # --- Deep intel (audience / trending / rival content / hooks / top / growth) ---
+    dintel = getattr(d, 'intel', None)
+    if dintel:
+        if dintel.audience and dintel.audience.enough_data:
+            au = dintel.audience
+            parts.append('<h2>Audience analysis</h2>')
+            parts.append(f'<p>{_esc(au.summary)}</p>')
+            if au.active_hours:
+                slots = ", ".join(f"{a.label} ({a.avg_engagement:,.0f} avg eng, {a.samples} posts)" for a in au.active_hours[:4])
+                parts.append(f'<p><b>Most active windows (UTC):</b> {_esc(slots)}</p>')
+            if au.format_affinity:
+                aff = ", ".join(f"{a.format} {a.engagement_index}%" for a in au.format_affinity[:4])
+                parts.append(f'<p><b>Format affinity (100 = account avg):</b> {_esc(aff)}</p>')
+            parts.append(f'<p><b>Engagement quality:</b> {_esc(au.engagement_quality)}</p>')
+            parts.append(f'<p class="muted">{_esc(au.audience_profile)}</p>')
+
+        if dintel.top_content and dintel.top_content.items:
+            tc = dintel.top_content
+            parts.append(f'<h2>Top-performing content</h2>')
+            parts.append(f'<p class="muted">{_esc(tc.summary)}</p><ul>')
+            for it in tc.items[:5]:
+                parts.append(
+                    f'<li><b>#{it.rank}</b> [{_esc(it.media_type)}] {_esc(it.caption)} — '
+                    f'{it.likes:,} likes · {it.comments:,} comments ({it.engagement_index}% of avg)'
+                    + (f' — {_esc(it.why_it_won)}' if it.why_it_won else '')
+                    + '</li>'
+                )
+            parts.append('</ul>')
+
+        if dintel.hooks and dintel.hooks.hooks:
+            hk = dintel.hooks
+            parts.append('<h2>Viral hooks to reuse</h2><ul>')
+            for h in hk.hooks[:5]:
+                src = f" (@{_esc(h.source_username)})" if h.source_username else ""
+                parts.append(f'<li>“{_esc(h.hook)}”{src} — {_esc(h.why_it_works)}</li>')
+            parts.append('</ul>')
+
+        if dintel.trending and dintel.trending.topics:
+            tt = dintel.trending
+            parts.append('<h2>Trending topics in the sample</h2><ul>')
+            for t in tt.topics[:6]:
+                parts.append(
+                    f'<li><b>{_esc(t.topic)}</b> ({_esc(t.momentum)}) — {t.mentions} post(s), '
+                    f'avg {_esc(f"{t.avg_engagement:,.0f}")} eng vs {_esc(f"{t.avg_engagement_overall:,.0f}")} overall</li>'
+                )
+            parts.append('</ul>')
+
+        if dintel.rival_content and dintel.rival_content.rivals:
+            rc = dintel.rival_content
+            parts.append('<h2>Competitor content analysis</h2>')
+            parts.append(f'<p class="muted">{_esc(rc.summary)}</p>')
+            parts.append('<table><tr><th>Rival</th><th>Followers</th><th>ER %</th><th>Format mix</th><th>Signature</th></tr>')
+            for rv in rc.rivals[:6]:
+                mix = ", ".join(f"{k} {v}%" for k, v in (rv.format_mix or {}).items())
+                parts.append(
+                    f'<tr><td>@{_esc(rv.username)}</td><td>{_km(rv.followers)}</td><td>{rv.engagement_rate}</td>'
+                    f'<td>{_esc(mix)}</td><td>{_esc(rv.signature_theme)}</td></tr>'
+                )
+            parts.append('</table>')
+            gaps = [c for c in (rc.comparisons or []) if c.formats_you_miss or c.hashtags_they_own]
+            if gaps:
+                parts.append('<h3>Gaps to exploit</h3><ul>')
+                for c in gaps[:5]:
+                    bits = []
+                    if c.formats_you_miss:
+                        bits.append("formats: " + ", ".join(c.formats_you_miss))
+                    if c.hashtags_they_own:
+                        bits.append("tags: " + ", ".join(c.hashtags_they_own[:4]))
+                    parts.append(f'<li><b>@{_esc(c.username)}</b> — {_esc("; ".join(bits))}</li>')
+                parts.append('</ul>')
+
+        if dintel.rival_growth and dintel.rival_growth.rivals:
+            rg = dintel.rival_growth
+            parts.append('<h2>Competitor growth tracking</h2>')
+            parts.append(f'<p class="muted">{_esc(rg.summary)}</p>')
+            parts.append('<table><tr><th>Rival</th><th>Scans</th><th>Followers now</th><th>Change</th><th>ER change</th></tr>')
+            for e in rg.rivals[:8]:
+                fchg = "—" if e.followers_change is None else f"{e.followers_change:+,}"
+                echg = "—" if e.er_change is None else f"{e.er_change:+.3f}"
+                parts.append(
+                    f'<tr><td>@{_esc(e.username)}</td><td>{e.scans}</td><td>{_km(e.followers_now)}</td>'
+                    f'<td>{fchg}</td><td>{echg}</td></tr>'
+                )
+            parts.append('</table>')
 
     # --- Monthly review (trajectory of stored scans) ---
     if d.review and d.review.scan_count > 0:
@@ -1335,6 +1435,159 @@ async def trend_alert(req: AnalyzeRequest):
     response = ai_engine.generate_trend_alerts(profile, metrics, profile.recent_posts)
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# Deep intel: audience, trending topics, rival content, hooks, top content,
+# rival growth tracking. Each endpoint is self-contained (fetch → analyze);
+# the /api/growth-plan dashboard carries the same sections via the intel
+# bundle so the UI and PDF stay single-source.
+# ---------------------------------------------------------------------------
+
+async def _intel_insight_and_rivals(username: str, rivals: int):
+    """Shared prep for the intel endpoints: fetch + analyze the account and,
+    when rivals > 0, research up to `rivals` auto-discovered competitors.
+    Returns (insight, rival_insights, warnings)."""
+    try:
+        profile = await scraper.get_profile(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch profile: {e}")
+
+    insight = await _analyze_one(profile)
+    storage.record_scan(insight)  # best-effort trend tracking
+    warnings = [w for w in [_data_quality_warning(insight)] if w]
+
+    rival_insights: list = []
+    if rivals > 0:
+        try:
+            candidates = await scraper.discover_related_profiles(username, limit=20)
+        except Exception:
+            candidates = []
+        if candidates:
+            try:
+                picked, _ = await _llm_call(ai_engine.pick_competitors, insight.profile, candidates, rivals)
+            except Exception:
+                picked = []
+            if picked:
+                try:
+                    profiles = await scraper.get_profiles_batch(picked)
+                except Exception:
+                    profiles = {}
+                items = list(profiles.items())
+                analyzed = await asyncio.gather(
+                    *(asyncio.get_event_loop().run_in_executor(_LLM_POOL, _analyze_fast, [p]) for _u, p in items)
+                )
+                by_user = {u.lower(): a[0] for (u, _p), a in zip(items, analyzed)}
+                for uname in picked:
+                    ri = by_user.get(uname.lower())
+                    if ri is None:
+                        continue
+                    rival_insights.append(ri)
+                    w = _data_quality_warning(ri)
+                    if w:
+                        warnings.append(w)
+
+    return insight, rival_insights, [w for w in warnings if w]
+
+
+@app.get("/api/intel/audience", response_model=AudienceAnalysis)
+async def intel_audience(username: str = Query(..., min_length=1)):
+    """Audience analysis inferred from the account's real engagement
+    behavior: active windows, format affinity, niche signals, engagement
+    quality. Cached profile data serves instantly; no LLM call."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        profile = await scraper.get_profile(uname)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch profile: {e}")
+    insight = await _analyze_one(profile)
+    storage.record_scan(insight)  # best-effort trend tracking
+    return intel.analyze_audience(insight)
+
+
+@app.post("/api/intel/trending", response_model=TrendingTopicsResponse)
+async def intel_trending(req: AnalyzeRequest, rivals: int = Query(0, ge=0, le=6)):
+    """Trending topics detected in the account's niche sample (its own fresh
+    posts + optional rivals'), with momentum labels and engagement context."""
+    try:
+        uname = scraper.normalize_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    insight, rival_insights, _warnings = await _intel_insight_and_rivals(uname, rivals)
+    return intel.detect_trending_topics(insight, rival_insights)
+
+
+@app.post("/api/intel/rival-content", response_model=CompetitorContentAnalysis)
+async def intel_rival_content(req: AnalyzeRequest, rivals: int = Query(3, ge=1, le=6)):
+    """Competitor content analysis: per-rival format mix, signature themes,
+    hashtag ownership, and what each rival does that the account doesn't."""
+    try:
+        uname = scraper.normalize_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    insight, rival_insights, _warnings = await _intel_insight_and_rivals(uname, rivals)
+    if not rival_insights:
+        return CompetitorContentAnalysis(
+            summary="No rivals could be researched for this account — content comparison needs at least one.",
+            enough_data=False,
+        )
+    return intel.analyze_rival_content(insight, rival_insights)
+
+
+@app.post("/api/intel/hooks", response_model=ViralHooksResponse)
+async def intel_hooks(req: AnalyzeRequest, rivals: int = Query(0, ge=0, le=6)):
+    """Viral-hook suggestions: the account's own top posts' proven openers,
+    pattern-matched hook rewrites, and one out-earning rival hook."""
+    try:
+        uname = scraper.normalize_username(req.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    insight, rival_insights, _warnings = await _intel_insight_and_rivals(uname, rivals)
+    return intel.suggest_viral_hooks(insight, rival_insights)
+
+
+@app.get("/api/intel/top-content", response_model=TopContentResponse)
+async def intel_top_content(username: str = Query(..., min_length=1)):
+    """Top-performing content: the account's best recent posts ranked by
+    real engagement, with per-post 'why it won' notes."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        profile = await scraper.get_profile(uname)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not fetch profile: {e}")
+    insight = await _analyze_one(profile)
+    return intel.rank_top_content(insight)
+
+
+@app.get("/api/intel/rival-growth", response_model=RivalGrowthResponse)
+async def intel_rival_growth(username: str = Query(..., min_length=1), rivals: int = Query(3, ge=1, le=6)):
+    """Competitor growth tracking from the agent's stored scan history:
+    each researched rival's follower/ER trajectory, honestly labeled when
+    tracking just started."""
+    try:
+        uname = scraper.normalize_username(username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    insight, rival_insights, _warnings = await _intel_insight_and_rivals(uname, rivals)
+    return intel.track_rival_growth(rival_insights)
 
 
 class ChatRequest(BaseModel):

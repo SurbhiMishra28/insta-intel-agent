@@ -151,6 +151,7 @@ class GrowthPlanResponse(BaseModel):
     trends_result: Optional["TrendsResponse"] = None
     review: Optional["MonthlyReviewResponse"] = None
     history: List["ScanRecord"] = []
+    intel: Optional["IntelResponse"] = None  # six deep-intel sections (dashboard + PDF)
 
 
 class BestTimeSlot(BaseModel):
@@ -375,6 +376,164 @@ class ScoreExplanation(BaseModel):
     drainers: List[str] = []
 
 
+# ---------- Deep Intel: audience, trending topics, rival content, hooks ----
+
+class AudienceActiveHour(BaseModel):
+    """One inferred high-signal posting window for the account's audience."""
+    hour: int                       # 0-23 UTC, start of the window
+    label: str                      # e.g. "18-21 UTC"
+    avg_engagement: float           # avg likes+comments earned by posts in this window
+    samples: int                    # posts backing the window
+    share_of_sample: int            # % of sampled posts that fall in the window
+
+
+class AudienceFormatAffinity(BaseModel):
+    """How the account's audience responds to each content format."""
+    format: str                     # image | reel | video | carousel
+    posts: int
+    avg_engagement: float
+    engagement_index: int           # 100 = account average; >100 over-indexes
+
+
+class AudienceAnalysis(BaseModel):
+    """Audience read inferred from the account's real posting signal.
+
+    Honest by design: Instagram exposes no follower demographics to a
+    third-party analyzer, so every field here is labeled as an inference
+    from observed engagement behavior — never presented as platform data.
+    """
+    summary: str
+    audience_profile: str               # who they likely are / why they follow
+    active_hours: List[AudienceActiveHour] = []   # best windows, strongest first
+    format_affinity: List[AudienceFormatAffinity] = []
+    niche_signals: List[str] = []       # hashtags/keywords defining the audience
+    engagement_quality: str             # qualitative read: likes vs comments mix
+    caveats: List[str] = []             # what this analysis can NOT know
+    enough_data: bool = True
+
+
+class TrendingTopic(BaseModel):
+    """A topic detected as trending within the analyzed sample."""
+    topic: str
+    momentum: str = "steady"            # rising | steady | fading
+    mentions: int = 0                   # posts in the sample touching this topic
+    avg_engagement: float = 0.0         # avg engagement of posts touching it
+    avg_engagement_overall: float = 0.0 # account-wide avg, for comparison
+    hashtags: List[str] = []            # representative tags seen with it
+    sample_caption: str = ""            # real caption excerpt grounding the topic
+
+
+class TrendingTopicsResponse(BaseModel):
+    summary: str
+    topics: List[TrendingTopic] = []
+    enough_data: bool = True
+
+
+class RivalContentOverlap(BaseModel):
+    """One rival's content profile vs the analyzed account."""
+    username: str
+    followers: int = 0
+    engagement_rate: float = 0.0
+    format_mix: dict = {}               # {image|reel|video|carousel: pct}
+    top_hashtags: List[str] = []
+    signature_theme: str = ""           # the theme this rival owns most strongly
+    avg_engagement: float = 0.0
+    posts_sampled: int = 0
+
+
+class RivalContentComparison(BaseModel):
+    """What a rival does differently from the analyzed account."""
+    username: str
+    formats_you_miss: List[str] = []    # formats the rival uses, account doesn't
+    hashtags_they_own: List[str] = []   # rival tags absent from the account's sample
+    theme_gap: str = ""                 # one-line theme differentiation
+    engagement_gap_pct: float = 0.0     # rival ER vs account ER, % delta
+
+
+class CompetitorContentAnalysis(BaseModel):
+    summary: str
+    rivals: List[RivalContentOverlap] = []
+    comparisons: List[RivalContentComparison] = []
+    enough_data: bool = True
+
+
+class ViralHook(BaseModel):
+    """A hook pattern, proven by the account's own top posts when possible."""
+    hook: str                       # the opening line / pattern text
+    source: str                     # 'own' | 'rival' | 'pattern'
+    source_username: str = ""       # whose post it came from (when not a pattern)
+    earned_engagement: int = 0      # likes+comments the source post earned
+    engagement_index: int = 100     # vs account average (100 = average)
+    why_it_works: str = ""
+    ready_caption: str = ""         # account-adapted caption opening
+
+
+class ViralHooksResponse(BaseModel):
+    summary: str
+    hooks: List[ViralHook] = []
+    enough_data: bool = True
+
+
+class TopContentItem(BaseModel):
+    """One of the account's own posts, ranked by real performance."""
+    rank: int
+    caption: str
+    media_type: str
+    likes: int
+    comments: int
+    views: int = 0
+    engagement: int                 # likes + comments
+    engagement_index: int = 100     # vs account average
+    posted_at: Optional[str] = None
+    posted_days_ago: int = 0
+    hashtags: List[str] = []
+    why_it_won: str = ""
+
+
+class TopContentResponse(BaseModel):
+    summary: str
+    best_format: str = ""
+    items: List[TopContentItem] = []
+    enough_data: bool = True
+
+
+class RivalGrowthPoint(BaseModel):
+    """One daily snapshot of a tracked rival."""
+    day: str
+    followers: int
+    engagement_rate: float
+    avg_likes: float = 0
+
+
+class RivalGrowthEntry(BaseModel):
+    """One rival's tracked growth trajectory from the agent's scan history."""
+    username: str
+    scans: int = 0
+    first_seen: str = ""
+    last_seen: str = ""
+    followers_now: int = 0
+    followers_change: Optional[int] = None  # None = single scan, tracking starts now
+    er_change: Optional[float] = None
+    series: List[RivalGrowthPoint] = []
+    note: str = ""
+
+
+class RivalGrowthResponse(BaseModel):
+    summary: str
+    rivals: List[RivalGrowthEntry] = []
+    enough_data: bool = True
+
+
+class IntelResponse(BaseModel):
+    """Bundle of all six deep-intel sections (dashboard + PDF single source)."""
+    audience: Optional[AudienceAnalysis] = None
+    trending: Optional[TrendingTopicsResponse] = None
+    rival_content: Optional[CompetitorContentAnalysis] = None
+    hooks: Optional[ViralHooksResponse] = None
+    top_content: Optional[TopContentResponse] = None
+    rival_growth: Optional[RivalGrowthResponse] = None
+
+
 # Resolve forward references (BestTimes etc. are defined from here on).
 ProfileMetrics.model_rebuild()
 GrowthPlanResponse.model_rebuild()
@@ -385,3 +544,5 @@ TrendSuggestion.model_rebuild()
 ReelTiming.model_rebuild()
 HashtagSuggestionResult.model_rebuild()
 WhitespaceResponse.model_rebuild()
+IntelResponse.model_rebuild()
+GrowthPlanResponse.model_rebuild()  # re-resolve now that IntelResponse exists

@@ -13,6 +13,7 @@ import ExtrasGrid from './components/ExtrasGrid.jsx';
 import ReelTimingView from './components/ReelTiming.jsx';
 import HashtagSuggestionView from './components/HashtagSuggestion.jsx';
 import Trends from './components/Trends.jsx';
+import IntelGrid from './components/IntelGrid.jsx';
 import MonthlyReviewer from './components/MonthlyReviewer.jsx';
 import WhitespaceFinder from './components/WhitespaceFinder.jsx';
 import PWAInstallBanner from './components/PWAInstallBanner.jsx';
@@ -286,6 +287,7 @@ export default function App() {
     ['timing', 'Timing'],
     ['toolkit', 'Toolkit'],
     ['trends', 'Trends'],
+    ['intel', 'Deep intel'],
     ['research', 'Competitors'],
     ['history', 'History'],
     ['chat', 'Ask AI'],
@@ -480,6 +482,12 @@ export default function App() {
               <p className="muted">No trend signals detected for this account.</p>
             )}
           </Section>
+
+          {dash.intel && (
+            <Section id="intel" accent="cyan" label="Deep intel — audience, topics, rivals, hooks, winners">
+              <IntelGrid intel={dash.intel} />
+            </Section>
+          )}
 
           {/* ---------- Deep dives ---------- */}
           <Section id="research" accent="violet" label="Deep dives — go further with one click">
