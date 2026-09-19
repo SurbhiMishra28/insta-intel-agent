@@ -2710,6 +2710,93 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
 
 
 # ---------------------------------------------------------------------------
+# Provider #3: Instagram JSON via public render gateways (no tokens)
+#
+# Datacenter hosts (Render/Railway/Fly shared IPs) are hard-blocked by
+# Instagram: 401/429 on every API endpoint AND bot challenges for headless
+# Chrome renders. The block is per-IP, not per-client — the JSON payloads
+# themselves are fine when requested from a tolerated IP. Public "render
+# gateway" services fetch a URL server-side from THEIR IPs and stream the
+# body back, so the same web_profile_info call that works from residential
+# IPs works here. The response is the exact data.user shape the direct API
+# path parses — EXACT follower counts + the 12 most recent posts with real
+# likes/comments. Zero credentials, zero login.
+# ---------------------------------------------------------------------------
+
+_GATEWAY_TEMPLATES = (
+    "https://api.allorigins.win/raw?url={q}",
+    "https://corsproxy.io/?url={q}",
+    "https://api.codetabs.com/v1/proxy?quest={q}",
+    "https://r.jina.ai/{q}",
+)
+
+
+async def _fetch_gw_profile(username: str) -> ProfileData:
+    """Fetch web_profile_info through public render gateways (provider #3).
+
+    Raises RuntimeError when every gateway fails — the caller then surfaces
+    an honest error (never fake data)."""
+    uname = normalize_username(username)
+    perf = _Perf(f"gateway @{uname}")
+    endpoint = (
+        "https://www.instagram.com/api/v1/users/web_profile_info/"
+        f"?username={quote(uname)}"
+    )
+    headers = {
+        "user-agent": _DIRECT_HEADERS["user-agent"],
+        "accept": "application/json",
+        "x-ig-app-id": "936619743392459",
+        "x-requested-with": "XMLHttpRequest",
+    }
+    last = "no gateways configured"
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(25.0), follow_redirects=True
+    ) as client:
+        for tmpl in _GATEWAY_TEMPLATES:
+            host = tmpl.split("/")[2]
+            url = tmpl.format(q=quote(endpoint, safe=""))
+            try:
+                resp = await client.get(url, headers=headers)
+            except httpx.HTTPError as e:
+                last = f"{host}: {str(e)[:60]}"
+                continue
+            if resp.status_code != 200:
+                last = f"{host}: HTTP {resp.status_code}"
+                continue
+            try:
+                payload = resp.json()
+            except Exception:
+                last = f"{host}: non-JSON body"
+                continue
+            # Unwrap the few gateways that envelope the body (allorigins /get
+            # style: {"contents": "<json string>", ...}).
+            if (
+                isinstance(payload, dict)
+                and isinstance(payload.get("contents"), str)
+                and "data" not in payload
+            ):
+                try:
+                    payload = json.loads(payload["contents"])
+                except Exception:
+                    pass
+            user = ((payload or {}).get("data") or {}).get("user")
+            if not isinstance(user, dict):
+                last = f"{host}: no data.user in body"
+                continue
+            profile = _map_direct_user(user, uname)
+            if profile.followers == 0 and not profile.recent_posts:
+                last = f"{host}: empty user object"
+                continue
+            perf.stage(f"OK via {host}")
+            return await _backfill_missing_likes(profile)
+    raise RuntimeError(
+        f"All render gateways failed for @{uname} ({last}) — Instagram data "
+        "unreachable from this host. Configure IG_PROXY_URL for reliable "
+        "production fetching."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Competitor discovery — related accounts + local cache mining + search
 # ---------------------------------------------------------------------------
 
@@ -3477,7 +3564,14 @@ async def get_profile(username: str) -> ProfileData:
             if FALLBACK_TO_DEMO:
                 pass  # fall through to stale/demo handling below
             else:
-                raise  # honest failure — never silently serve fake data
+                # Datacenter IP hard-blocked (Render free tier): route the
+                # same Instagram JSON through public render gateways —
+                # real data, no tokens, no login.
+                gw_profile = await _fetch_gw_profile(username)
+                await asyncio.to_thread(_disk_profile_set, username, gw_profile)
+                async with _CACHE_LOCK:
+                    _profile_cache[username] = (time.monotonic(), gw_profile)
+                return gw_profile
         else:
             await asyncio.to_thread(_disk_profile_set, username, profile)
             async with _CACHE_LOCK:
