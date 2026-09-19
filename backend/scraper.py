@@ -3402,7 +3402,11 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
             try:
                 profile = await _fetch_direct_profile(u)
             except (ValueError, RuntimeError, httpx.HTTPError):
-                continue  # caller surfaces missing handles as warnings
+                # Blocked-IP hosts: last resort before giving up on the handle.
+                try:
+                    profile = await _fetch_gw_profile(u)
+                except (RuntimeError, httpx.HTTPError):
+                    continue  # caller surfaces missing handles as warnings
             await asyncio.to_thread(_disk_profile_set, u, profile)
             async with _CACHE_LOCK:
                 _profile_cache[u] = (time.monotonic(), profile)
