@@ -2522,14 +2522,12 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     when Instagram blocks/rate-limits every attempt."""
     perf = _Perf(f"direct @{username}")
     global _api_block_until
-    # Recently blocked (401/403/429)? Skip the doomed API call entirely —
-    # the Chrome render below is the real data path on this IP.
+    # Recently blocked (401/403/429)? Don't abort — the JSON-API ladder below
+    # re-checks cheaply (Instagram answers 401 in ~1s) and the real data path
+    # on this IP is the HTML page + Chrome render that follow it.
     if time.monotonic() < _api_block_until:
-        perf.stage("skip web_profile_info (API blocked recently)")
-        raise RuntimeError(
-            "Instagram API endpoints are rate-limiting this IP (recent block) — "
-            "serving via the rendered-page path instead."
-        )
+        perf.stage("API blocked recently — retry ladder cheaply, rely on render")
+        _api_block_until = 0.0
     # Headless-Chrome profile render starts IMMEDIATELY, in parallel with the
     # HTTP ladder below. On this IP the API endpoints answer 401 within a
     # couple of seconds and the real data comes from the rendered page —
