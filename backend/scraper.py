@@ -41,6 +41,7 @@ import os
 import random
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1415,6 +1416,13 @@ _CHROME_CONTAINER_FLAGS = [
     ) if flag
 ]
 
+# Render's free tier gives ~512MB RAM. Two concurrent headless-Chrome
+# launches (a --dump-dom render plus the CDP GraphQL Chrome) swap and
+# OOM-kill each other, and both report "could not render the page".
+# Serialize ALL Chrome work process-wide — renders are short and the
+# fetches are already async, so throughput stays fine.
+_CHROME_RENDER_LOCK = threading.Lock()
+
 
 def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
     """Render a page in headless Chrome and return the final DOM (sync).
@@ -1443,7 +1451,8 @@ def _chrome_dump_sync(url: str, budget_ms: int = 12000) -> Optional[str]:
             f"--virtual-time-budget={budget_ms}", "--dump-dom", url,
             f"--user-data-dir={profile_dir}",
         ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=45)
+        with _CHROME_RENDER_LOCK:  # one Chrome at a time (512MB hosts)
+            proc = subprocess.run(cmd, capture_output=True, timeout=45)
         if proc.returncode != 0:
             return None
         dom = (proc.stdout or b"").decode("utf-8", errors="replace")
@@ -1508,27 +1517,28 @@ def _cdp_ws_url() -> Optional[str]:
         import subprocess
         import tempfile
         os.makedirs(os.path.join(tempfile.gettempdir(), "instaiq-chrome"), exist_ok=True)
-        subprocess.Popen(
-            [
-                chrome,
-                f"--remote-debugging-port={_CDP_PORT}",
-                f"--user-data-dir={os.path.join(tempfile.gettempdir(), 'instaiq-chrome')}",
-                "--headless=new", "--disable-gpu", "--no-first-run",
-                *_CHROME_CONTAINER_FLAGS, *_chrome_proxy_flags(),
-                "--no-default-browser-check", "--window-size=1280,2400",
-                f"--user-agent={_DIRECT_HEADERS['user-agent']}",
-                "https://www.instagram.com/",
-            ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        for _ in range(30):  # wait for the DevTools endpoint + a usable tab
-            time.sleep(1)
-            try:
-                hit = _pick_tab()
-                if hit:
-                    return hit["webSocketDebuggerUrl"]
-            except Exception:
-                pass
+        with _CHROME_RENDER_LOCK:  # one Chrome at a time (512MB hosts)
+            subprocess.Popen(
+                [
+                    chrome,
+                    f"--remote-debugging-port={_CDP_PORT}",
+                    f"--user-data-dir={os.path.join(tempfile.gettempdir(), 'instaiq-chrome')}",
+                    "--headless=new", "--disable-gpu", "--no-first-run",
+                    *_CHROME_CONTAINER_FLAGS, *_chrome_proxy_flags(),
+                    "--no-default-browser-check", "--window-size=1280,2400",
+                    f"--user-agent={_DIRECT_HEADERS['user-agent']}",
+                    "https://www.instagram.com/",
+                ],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            for _ in range(30):  # wait for the DevTools endpoint + a usable tab
+                time.sleep(1)
+                try:
+                    hit = _pick_tab()
+                    if hit:
+                        return hit["webSocketDebuggerUrl"]
+                except Exception:
+                    pass
         return None
     except Exception:
         return None
@@ -2522,11 +2532,17 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     when Instagram blocks/rate-limits every attempt."""
     perf = _Perf(f"direct @{username}")
     global _api_block_until
-    # Recently blocked (401/403/429)? Don't abort — the JSON-API ladder below
-    # re-checks cheaply (Instagram answers 401 in ~1s) and the real data path
-    # on this IP is the HTML page + Chrome render that follow it.
+    # Recently blocked (401/403/429)? Don't abort — go straight to the
+    # in-page GraphQL provider: a real browser context is the most likely
+    # path to real data on this IP, while the JSON ladder below is doomed
+    # (Instagram answers 401/429 in ~1s). If GraphQL also fails, clear the
+    # stale block flag and still run the ladder + Chrome render once.
     if time.monotonic() < _api_block_until:
-        perf.stage("API blocked recently — retry ladder cheaply, rely on render")
+        perf.stage("API blocked recently — in-page GraphQL first")
+        gql = await _fetch_graphql_profile(username)
+        if gql is not None and (gql.recent_posts or gql.followers > 0):
+            gql = await _backfill_missing_likes(gql)
+            return gql
         _api_block_until = 0.0
     # Headless-Chrome profile render starts IMMEDIATELY, in parallel with the
     # HTTP ladder below. On this IP the API endpoints answer 401 within a
