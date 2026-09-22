@@ -158,6 +158,39 @@ identically without it.
 5. Add env vars `DATA_MODE=live` and `APIFY_TOKEN` (mark it as a secret).
 6. Deploy. You'll get a URL like `https://your-app.onrender.com`.
 
+**Recommended for Render: the Cloudflare Worker IG relay (free, ~5 min).**
+Instagram hard-blocks Render's datacenter IP, so the backend needs a relay
+that fetches from Cloudflare's edge instead. The worker lives in
+`cloudflare-worker/ig-relay.js`:
+
+```bash
+cd cloudflare-worker
+npx wrangler login        # once
+npx wrangler deploy       # prints https://ig-relay.<your-subdomain>.workers.dev
+npx wrangler secret put RELAY_TOKEN   # paste a random secret (e.g. `python -c "import secrets;print(secrets.token_hex(24))"`)
+```
+
+Then on the Render service add (mirroring the same secret):
+
+- `IG_GATEWAY_URLS = https://ig-relay.<your-subdomain>.workers.dev/?url={q}`
+- `IG_GATEWAY_TOKEN = <the RELAY_TOKEN value>`
+
+For the direct Instagram HTTP/Chrome fallback, also add a residential or
+mobile proxy in Render only:
+
+- `IG_PROXY_URL = http://user:pass@proxy-host:port`
+
+`IG_PROXY_URL` does not authenticate the Cloudflare relay; a protected relay
+still requires the matching `IG_GATEWAY_TOKEN`. Do not put either value in
+Vercel. The frontend needs only:
+
+- `VITE_API_URL = https://<your-render-service>.onrender.com`
+
+The backend automatically appends `&token=...` to every gateway call and
+falls back to public gateways/Apify when the relay is challenged. The worker
+is locked to Instagram's `web_profile_info` endpoint only (not an open
+proxy) and the free tier allows 100k requests/day.
+
 **Frontend → Vercel or Netlify (free tier):**
 1. New project → import the repo, set root directory to `frontend`.
 2. Build command: `npm run build`, output directory: `dist`.

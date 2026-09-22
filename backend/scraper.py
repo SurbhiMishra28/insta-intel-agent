@@ -2734,9 +2734,11 @@ _PUBLIC_GATEWAYS = (
     "https://api.codetabs.com/v1/proxy?quest={q}",
     "https://r.jina.ai/{q}",
 )
+_GATEWAY_URLS_ENV = os.getenv("IG_GATEWAY_URLS", "").strip()
 _GATEWAY_TEMPLATES = tuple(
-    t.strip() for t in os.getenv("IG_GATEWAY_URLS", "").split(",") if t.strip()
+    t.strip() for t in _GATEWAY_URLS_ENV.split(",") if t.strip()
 ) or _PUBLIC_GATEWAYS
+_CUSTOM_GATEWAYS_CONFIGURED = bool(_GATEWAY_URLS_ENV)
 
 
 async def _fetch_gw_profile(username: str) -> ProfileData:
@@ -2759,7 +2761,8 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
     last = "no gateways configured"
     token = os.getenv("IG_GATEWAY_TOKEN", "").strip()
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(25.0), follow_redirects=True
+        timeout=httpx.Timeout(25.0), follow_redirects=True,
+        proxy=_ig_httpx_proxy(),
     ) as client:
         for tmpl in _GATEWAY_TEMPLATES:
             host = tmpl.split("/")[2]
@@ -2772,7 +2775,27 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
                 last = f"{host}: {str(e)[:60]}"
                 continue
             if resp.status_code != 200:
+                detail = ""
+                try:
+                    body = resp.json()
+                    if (
+                        isinstance(body, dict)
+                        and str(body.get("error", "")).lower() == "unauthorized"
+                    ):
+                        detail = (
+                            "relay unauthorized; set IG_GATEWAY_TOKEN to the Worker "
+                            "RELAY_TOKEN"
+                        )
+                except Exception:
+                    pass
+                if resp.status_code == 401 and _CUSTOM_GATEWAYS_CONFIGURED:
+                    detail = detail or (
+                        "relay rejected the request; verify IG_GATEWAY_TOKEN matches "
+                        "the Worker RELAY_TOKEN"
+                    )
                 last = f"{host}: HTTP {resp.status_code}"
+                if detail:
+                    last += f" ({detail})"
                 continue
             try:
                 payload = resp.json()
@@ -2800,10 +2823,20 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
                 continue
             perf.stage(f"OK via {host}")
             return await _backfill_missing_likes(profile)
+    if _CUSTOM_GATEWAYS_CONFIGURED:
+        hint = (
+            "Verify IG_GATEWAY_TOKEN on Render exactly matches RELAY_TOKEN in the "
+            "Cloudflare Worker. IG_PROXY_URL only affects direct Instagram "
+            "HTTP/Chrome requests and does not fix relay authentication."
+        )
+    else:
+        hint = (
+            "Configure IG_PROXY_URL for the direct Instagram HTTP/Chrome path, "
+            "or configure a protected IG_GATEWAY_URLS/IG_GATEWAY_TOKEN relay."
+        )
     raise RuntimeError(
         f"All render gateways failed for @{uname} ({last}) — Instagram data "
-        "unreachable from this host. Configure IG_PROXY_URL for reliable "
-        "production fetching."
+        f"unreachable from this host. {hint}"
     )
 
 
@@ -3576,13 +3609,24 @@ async def get_profile(username: str) -> ProfileData:
                 async with _CACHE_LOCK:
                     _profile_cache[username] = (time.monotonic(), gql_profile)
                 return gql_profile
-            if FALLBACK_TO_DEMO:
-                pass  # fall through to stale/demo handling below
-            else:
-                # Datacenter IP hard-blocked (Render free tier): route the
-                # same Instagram JSON through public render gateways —
-                # real data, no tokens, no login.
+            # Datacenter IP hard-blocked (Render free tier): route the same
+            # Instagram JSON through render gateways (your own relay via
+            # IG_GATEWAY_URLS, or the built-in public ones) — real data, no
+            # tokens, no login. This runs BEFORE the simulated fallback so a
+            # tokenless blocked-IP deployment keeps serving real data instead
+            # of silently degrading to badged demo rows.
+            try:
                 gw_profile = await _fetch_gw_profile(username)
+            except (RuntimeError, httpx.HTTPError) as gw_err:
+                if FALLBACK_TO_DEMO:
+                    print(
+                        f"[fetch] @{username}: gateways also failed "
+                        f"({str(gw_err)[:120]}) — serving badged simulated data"
+                    )
+                    pass  # fall through to stale/demo handling below
+                else:
+                    raise  # honest failure — never fake data by default
+            else:
                 await asyncio.to_thread(_disk_profile_set, username, gw_profile)
                 async with _CACHE_LOCK:
                     _profile_cache[username] = (time.monotonic(), gw_profile)

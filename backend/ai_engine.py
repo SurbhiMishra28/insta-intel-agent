@@ -76,6 +76,36 @@ if LLM_API_KEY.startswith("nvapi") and not LLM_BASE_URL:
     # gpt-oss-20b: current NIM default. (llama-3.1-8b reached EOL 2026-08.)
     LLM_MODEL = (os.getenv("LLM_MODEL", "") or "").strip() or "openai/gpt-oss-20b"
 
+# NIM model ids rot (EOL announcements are routine on their forums) and a
+# rotting id fails every chain with the same opaque provider error. Fail over
+# through a small candidate list before giving up to the rule-based fallback.
+_LLM_FALLBACK_MODELS = [
+    t.strip() for t in os.getenv(
+        "LLM_FALLBACK_MODELS",
+        # Verified live against NIM 2026-09: gpt-oss-120b / llama-3.3 / minimax
+        # are 410-Gone; mistral-large-2 has no function-calling. glm-5.3 and
+        # kimi-k3 are listed and work, just slower than gpt-oss-20b.
+        "z-ai/glm-5.3,moonshotai/kimi-k3",
+    ).split(",") if t.strip()
+]
+
+
+# Model ids that failed with a MODEL-class error (404/deprecated/etc.) this
+# process — skipped by every later chain. Without this, each new request pays
+# the same doomed attempt before failing over. Resets on process restart or
+# when the model starts working again elsewhere.
+_LLM_DEAD_MODELS: set = set()
+
+
+def _llm_model_candidates() -> List[str]:
+    """Ordered model ids to try: configured primary first, then fallbacks,
+    minus ids already known-dead this process."""
+    seen: List[str] = []
+    for m in [LLM_MODEL, *_LLM_FALLBACK_MODELS]:
+        if m and m not in seen and m not in _LLM_DEAD_MODELS:
+            seen.append(m)
+    return seen
+
 
 # ---------------------------------------------------------------------------
 # Structured outputs (LangChain with_structured_output)
@@ -106,7 +136,7 @@ class CompetitorShortlist(BaseModel):
     rationale: str = Field(description="One or two sentences on why these were chosen")
 
 
-_LLM_CACHE: Dict[float, Any] = {}  # temperature -> shared client instance
+_LLM_CACHE: Dict[Any, Any] = {}  # (model, temperature) -> shared client instance
 
 
 def _get_llm(temperature: float = LLM_TEMPERATURE):
@@ -120,25 +150,7 @@ def _get_llm(temperature: float = LLM_TEMPERATURE):
     """
     if not LLM_API_KEY:
         return None
-    cached = _LLM_CACHE.get(temperature)
-    if cached is not None:
-        return cached
-    from langchain_openai import ChatOpenAI
-    extra = {"reasoning_effort": "low"} if "gpt-oss" in LLM_MODEL else {}
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        api_key=LLM_API_KEY,
-        base_url=LLM_BASE_URL or None,
-        temperature=temperature,
-        max_retries=1,
-        timeout=int(os.getenv("LLM_TIMEOUT", "20")),  # bounded: NIM outages must degrade fast
-        # Bounds hidden reasoning + output; too small truncates the JSON and
-        # forces wasteful retries, too big lets a chain hog the request.
-        max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4000")),
-        model_kwargs=extra,
-    )
-    _LLM_CACHE[temperature] = llm
-    return llm
+    return _client_for_model(LLM_MODEL, temperature)
 
 
 # --- LLM circuit breaker ---------------------------------------------------
@@ -147,22 +159,197 @@ def _get_llm(temperature: float = LLM_TEMPERATURE):
 # the rule-based narrative — analyze calls hung for minutes. The breaker
 # opens after the first failure and short-circuits every LLM call for a
 # cooldown window; the deterministic narrative serves instantly meanwhile.
-_LLM_BREAKER = {"open_until": 0.0}
+_LLM_BREAKER = {"open_until": 0.0, "reason": ""}
 _LLM_BREAKER_COOLDOWN = float(os.getenv("LLM_BREAKER_COOLDOWN", "120"))
+# A pure TIMEOUT is not evidence the provider is down: NIM's free tier
+# regularly runs 30-60s+ under contention, and one slow chain (insight,
+# growth plan) must not kill chat — which answers in ~6s — for the whole
+# cooldown. Timeouts open this SHORT breaker; hard errors (4xx, connection,
+# parse failures) open the full one.
+_LLM_BREAKER_COOLDOWN_SOFT = float(os.getenv("LLM_BREAKER_COOLDOWN_SOFT", "8"))
+_LLM_LAST_ERROR: str = ""
 
 
 def _llm_available() -> bool:
     return time.monotonic() >= _LLM_BREAKER["open_until"]
 
 
-def _llm_trip_breaker(reason: str) -> None:
-    until = time.monotonic() + _LLM_BREAKER_COOLDOWN
-    _LLM_BREAKER["open_until"] = until
-    print(f"[llm] circuit breaker OPEN for {_LLM_BREAKER_COOLDOWN:.0f}s ({reason})", flush=True)
+def _llm_trip_breaker(reason: str = "") -> None:
+    global _LLM_LAST_ERROR
+    s = (reason or "").lower()
+    # Soft class = provider congestion/garbage, not an outage: slow response,
+    # null structured result, parse/validation failures. A different request
+    # (or the next candidate model) plausibly succeeds within seconds.
+    timed_out = (
+        "timed out" in s or "timeout" in s or "deadline" in s
+        or "parse" in s or "validation" in s or "none" in s or "null" in s
+    )
+    cooldown = _LLM_BREAKER_COOLDOWN_SOFT if timed_out else _LLM_BREAKER_COOLDOWN
+    _LLM_BREAKER["open_until"] = time.monotonic() + cooldown
+    _LLM_BREAKER["reason"] = reason or "unknown"
+    _LLM_LAST_ERROR = reason or "unknown"
+    print(f"[llm] circuit breaker OPEN for {cooldown:.0f}s ({reason})", flush=True)
 
 
 def _llm_note_success() -> None:
     _LLM_BREAKER["open_until"] = 0.0
+    _LLM_BREAKER["reason"] = ""
+    global _LLM_LAST_ERROR
+    _LLM_LAST_ERROR = ""
+
+
+def llm_status() -> dict:
+    """Diagnostic snapshot for /api/ai-status: what would an LLM call do right
+    now, and why did the last one fail (empty = never failed)?"""
+    return {
+        "configured": bool(LLM_API_KEY),
+        "provider": "nvidia-nim" if LLM_BASE_URL.endswith("nvidia.com/v1") else ("custom" if LLM_BASE_URL else "openai"),
+        "model": LLM_MODEL,
+        "model_candidates": _llm_model_candidates() if LLM_API_KEY else [],
+        "available": _llm_available() if LLM_API_KEY else False,
+        "breaker_open_until": _LLM_BREAKER["open_until"],
+        "breaker_reason": _LLM_BREAKER["reason"],
+        "last_error": _LLM_LAST_ERROR,
+    }
+
+
+def _client_for_model(model: str, temperature: float = LLM_TEMPERATURE):
+    """Shared ChatOpenAI client per (model, temperature)."""
+    key = (model, temperature)
+    cached = _LLM_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from langchain_openai import ChatOpenAI
+    base = dict(
+        model=model,
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL or None,
+        temperature=temperature,
+        max_retries=1,
+        # Measured on NIM free tier 2026-09: the full insight prompt (12 posts
+        # + metrics) needs 30-60s even with reasoning_effort=low; toy prompts
+        # answer in ~9s. 60s covers the heavy chains; chat's short prompt is
+        # naturally fast and NIM outages still degrade via the total deadline.
+        timeout=int(os.getenv("LLM_TIMEOUT", "60")),
+        # Bounds hidden reasoning + output; too small truncates the JSON and
+        # forces wasteful retries, too big lets a chain hog the request.
+        max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4000")),
+    )
+    # reasoning_effort MUST be a constructor kwarg (first-class ChatOpenAI
+    # field in langchain-openai >= 0.2.3): via model_kwargs it is silently
+    # dropped, and via .bind() it does not survive .with_structured_output()
+    # wrapping — either way gpt-oss burns its hidden-thinking budget and
+    # structured chains blow the timeout.
+    if "gpt-oss" in model:
+        try:
+            llm = ChatOpenAI(**base, reasoning_effort="low")
+        except TypeError:  # older langchain-openai without the field
+            llm = ChatOpenAI(**base, model_kwargs={"reasoning_effort": "low"})
+    else:
+        llm = ChatOpenAI(**base)
+    _LLM_CACHE[key] = llm
+    return llm
+
+
+def _classify_llm_error(exc: Exception) -> str:
+    """'model' = trying another model id could help; 'fatal' = don't bother."""
+    s = str(exc).lower()
+    if any(t in s for t in (
+        "404", "not found", "no such model", "does not exist", "deprecated",
+        "unsupported", "invalid model", "model_not_found", "410", "gone",
+    )):
+        return "model"
+    if any(t in s for t in ("401", "403", "invalid api key", "incorrect api key", "unauthorized")):
+        return "fatal"  # key-level: every model will fail the same way
+    if "timeout" in s or "timed out" in s:
+        return "model"  # a slow/hung MODEL — the next candidate may be fine
+    if "connection" in s or "network" in s:
+        return "fatal"  # endpoint-level: all models share the same host
+    return "fatal"
+
+
+def _structured(llm, schema):
+    """Central wrapper for every structured-output chain.
+
+    method='function_calling' measured ~2x faster than json_schema on NIM
+    gpt-oss (8.9s vs 16s) and json_schema mode is what hung into timeouts
+    before. One place to change if NIM's behavior shifts again."""
+    return llm.with_structured_output(schema, method="function_calling")
+
+
+async def _invoke_llm(run, timeout: float | None = None):
+    """Failover wrapper: try each candidate model through run(client).
+
+    run is a sync callable (chain.invoke or similar) — executed off the event
+    loop. Model-class errors advance to the next candidate; anything else is
+    fatal. Raises RuntimeError (diagnosable) or TimeoutError.
+    """
+    import asyncio as _asyncio
+    global _LLM_LAST_ERROR
+    if not _llm_available():
+        raise RuntimeError(
+            f"LLM circuit breaker is OPEN for another "
+            f"{max(0.0, _LLM_BREAKER['open_until'] - time.monotonic()):.0f}s "
+            f"(last reason: {_LLM_BREAKER['reason']})"
+        )
+    total = timeout or float(os.getenv("LLM_TOTAL_TIMEOUT", "70"))
+    # Split the budget across attempts: without a per-attempt cap the first
+    # candidate can hang for the whole deadline and the failover never fires
+    # (measured live: gpt-oss-20b hung 70s while glm-5.3 would have answered).
+    per_attempt = float(os.getenv("LLM_PER_ATTEMPT_TIMEOUT", "0")) or total / 2
+    deadline = time.monotonic() + total
+    errors: list = []
+    loop = _asyncio.get_event_loop()
+    for model in _llm_model_candidates():
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            break
+        client = _client_for_model(model)
+        try:
+            result = await _asyncio.wait_for(
+                loop.run_in_executor(None, run, client), timeout=min(remaining, per_attempt)
+            )
+            _llm_note_success()
+            return result
+        except _asyncio.TimeoutError:
+            # Hard wall-clock cap per attempt: the HTTP read-timeout does not
+            # bound total request time (headers can arrive slowly for minutes).
+            used = min(remaining, per_attempt)
+            errors.append(f"{model}: attempt exceeded {used:.0f}s deadline")
+            _LLM_LAST_ERROR = errors[-1]
+            print(f"[llm] {model}: attempt exceeded {used:.0f}s deadline", flush=True)
+            continue  # try the next candidate within the remaining budget
+        except Exception as e:  # noqa: BLE001 — classify everything
+            kind = _classify_llm_error(e)
+            errors.append(f"{model}: {str(e)[:120]}")
+            _LLM_LAST_ERROR = f"{model}: {str(e)[:200]}"
+            print(f"[llm] model {model} failed ({kind}): {str(e)[:120]}", flush=True)
+            if kind == "fatal":
+                break
+    _llm_trip_breaker("; ".join(errors[-2:]))
+    raise RuntimeError("LLM unavailable after failover — " + ("; ".join(errors) or "no candidates"))
+
+
+def _bind_chat_prompt(client, ctx_text: str, message: str):
+    """Prompt|client chain for /api/chat. Called per failover attempt with the
+    candidate model's client; blocks (run inside _invoke_llm's executor)."""
+    from langchain_core.prompts import ChatPromptTemplate
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system",
+         "You are an Instagram growth analyst. Answer the user's question "
+         "concisely and concretely. If context about an account is provided, "
+         "ground your answer in that data. Never invent numbers. "
+         "Reply in plain text only - no markdown, no ** or # formatting."),
+        ("human",
+         "Account context (may be empty):\n{context}\n\n"
+         "Question:\n{message}\n\n"
+         "Answer:"),
+    ])
+    return (prompt | client).invoke(
+        {"context": ctx_text or "(no account data)", "message": message}
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -413,9 +600,14 @@ def analyze_profile(profile: ProfileData, use_llm: bool = True) -> ProfileInsigh
             prompt = ChatPromptTemplate.from_messages(
                 [("system", _INSIGHT_SYSTEM), ("human", _INSIGHT_HUMAN)]
             )
-            chain = prompt | llm.with_structured_output(ProfileNarrative)
-            narrative = chain.invoke({"facts": _profile_facts(profile, metrics)})
-            _llm_note_success()
+            chain = prompt | _structured(llm, ProfileNarrative)
+            llm_narrative = chain.invoke({"facts": _profile_facts(profile, metrics)})
+            # A congested NIM occasionally returns a null/garbage structured
+            # result — keep the rule-based narrative instead of tripping the
+            # global breaker over one bad response.
+            if llm_narrative is not None:
+                narrative = llm_narrative
+                _llm_note_success()
         except Exception as e:
             _llm_trip_breaker(f"insight chain failed: {str(e)[:80]}")
             # keep the rule-based narrative on any LLM failure
@@ -625,7 +817,7 @@ def pick_competitors(main_profile: ProfileData, candidates: List[dict], count: i
             prompt = ChatPromptTemplate.from_messages(
                 [("system", _RESEARCH_SYSTEM), ("human", _PICK_HUMAN)]
             )
-            chain = prompt | llm.with_structured_output(CompetitorShortlist)
+            chain = prompt | _structured(llm, CompetitorShortlist)
             result: CompetitorShortlist = chain.invoke({
                 "main_facts": _profile_facts(main_profile, compute_metrics(main_profile)),
                 "candidates": "\n".join(row(c) for c in candidates[:30]),
@@ -743,7 +935,7 @@ def build_market_research(main: ProfileInsight, competitors: List[ProfileInsight
             prompt = ChatPromptTemplate.from_messages(
                 [("system", _RESEARCH_SYSTEM), ("human", _RESEARCH_HUMAN)]
             )
-            chain = prompt | llm.with_structured_output(MarketResearch)
+            chain = prompt | _structured(llm, MarketResearch)
             llm_research: MarketResearch = chain.invoke({
                 "main_facts": _profile_facts(main.profile, main.metrics),
                 "competitor_rows": "\n".join(row(c) for c in competitors),
@@ -974,7 +1166,7 @@ def build_growth_plan(main: ProfileInsight, rivals: Optional[List[ProfileInsight
             prompt = ChatPromptTemplate.from_messages(
                 [("system", _GROWTH_SYSTEM), ("human", _GROWTH_HUMAN)]
             )
-            chain = prompt | llm.with_structured_output(GrowthPlan)
+            chain = prompt | _structured(llm, GrowthPlan)
             llm_plan: GrowthPlan = chain.invoke({
                 "facts": _profile_facts(main.profile, main.metrics),
                 "n_posts": len(main.profile.recent_posts),
@@ -983,8 +1175,10 @@ def build_growth_plan(main: ProfileInsight, rivals: Optional[List[ProfileInsight
                 "followers": f"{main.profile.followers:,}",
                 "er": main.metrics.engagement_rate,
             })
-            # Sanity: never let an LLM hallucinate an empty plan.
-            if llm_plan.post_ideas and llm_plan.content_pillars:
+            # Sanity: never let an LLM hallucinate an empty plan — and a null
+            # result (congested NIM returns those) must not AttributeError into
+            # a full breaker trip; the rule-based plan below is already valid.
+            if llm_plan is not None and llm_plan.post_ideas and llm_plan.content_pillars:
                 plan = llm_plan
                 _llm_note_success()
         except Exception as e:
@@ -1656,7 +1850,7 @@ def generate_whitespace_and_captions(
                  "Identify the content whitespace and write 4 ready-to-post captions "
                  "targeting those gaps."),
             ])
-            chain = prompt | llm.with_structured_output(WhitespaceResponse)
+            chain = prompt | _structured(llm, WhitespaceResponse)
             llm_result: WhitespaceResponse = chain.invoke({
                 "username": insight.profile.username,
                 "followers": f"{insight.profile.followers:,}",

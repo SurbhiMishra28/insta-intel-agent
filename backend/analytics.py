@@ -703,7 +703,7 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
     fallback = _rule_based_bio(insight)
 
     try:
-        from ai_engine import _get_llm, _profile_facts, _llm_available, _llm_trip_breaker, _llm_note_success
+        from ai_engine import _get_llm, _profile_facts, _llm_available, _llm_trip_breaker, _llm_note_success, _structured
         llm = _get_llm() if _llm_available() else None
         if llm is None:
             return fallback
@@ -719,7 +719,7 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
              "Rewrite it: line 1 = who/what, line 2 = value for the follower, "
              "line 3 = proof, line 4 = CTA. Keep it honest and specific to this account."),
         ])
-        chain = prompt | llm.with_structured_output(BioOptimizer)
+        chain = prompt | _structured(llm, BioOptimizer)
         result: BioOptimizer = chain.invoke({
             "facts": _profile_facts(insight.profile, insight.metrics),
             "bio": insight.profile.bio or "(empty)",

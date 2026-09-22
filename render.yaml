@@ -34,7 +34,12 @@ services:
       - key: APIFY_TOKEN
         sync: false          # optional; keyless fallback works without it
       - key: IG_GATEWAY_URLS
-        sync: false          # optional; comma-separated relay URLs for blocked-IP fallback
+        sync: false          # comma-separated relay URLs for blocked-IP fallback.
+                             # Your own worker (free, see cloudflare-worker/ig-relay.js):
+                             #   https://ig-relay.<your-subdomain>.workers.dev/?url={q}
+      - key: IG_GATEWAY_TOKEN
+        sync: false          # RELAY_TOKEN of the worker above (wrangler secret put RELAY_TOKEN);
+                             # backend appends it as &token=... on every gateway call
       - key: IG_PROXY_URL
         sync: false          # optional; residential proxy for IG fetches
       - key: DATA_MODE

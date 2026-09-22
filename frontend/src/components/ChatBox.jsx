@@ -59,7 +59,7 @@ export default function ChatBox({ context }) {
         throw new Error(`Chat request failed (${res.status}): ${detail.slice(0, 200)}`);
       }
       const data = await res.json();
-      setMessages((prev) => [...prev, { role: 'bot', text: data.answer }]);
+      setMessages((prev) => [...prev, { role: 'bot', text: data.answer, llm: data.llm_used !== false }]);
     } catch (err) {
       console.error('[ChatBox] request failed:', err);
       setMessages((prev) => [
@@ -104,7 +104,7 @@ export default function ChatBox({ context }) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          zIndex: 999,
+          zIndex: 1001,
           transition: 'transform 0.15s ease',
         }}
         aria-label="Open chat"
@@ -127,7 +127,7 @@ export default function ChatBox({ context }) {
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
-          zIndex: 999,
+          zIndex: 1001,
         }}>
           {/* Header */}
           <div style={{
@@ -192,6 +192,11 @@ export default function ChatBox({ context }) {
                 }}
               >
                 {m.text}
+                {m.role === 'bot' && m.llm === false && (
+                  <div style={{ marginTop: 4, fontSize: 10, fontStyle: 'italic', color: 'var(--paper-dim)', opacity: 0.75 }}>
+                    ⚙ rule-based answer — AI provider unavailable (check /api/ai-status)
+                  </div>
+                )}
               </div>
             ))}
             {loading && (

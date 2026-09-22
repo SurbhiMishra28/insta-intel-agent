@@ -411,10 +411,56 @@ def data_source_info():
             ).fetchone()[0]
     except Exception:
         pass
-    live = scraper.DATA_MODE == "live" and bool(scraper.APIFY_TOKENS)
+    # In live mode, the backend can use Apify, the official Graph API, or a
+    # configured relay. Without one of those providers, Render's datacenter IP
+    # is normally blocked by Instagram's direct endpoints.
+    gateway_configured = scraper._CUSTOM_GATEWAYS_CONFIGURED
+    gateway_token_configured = bool(os.getenv("IG_GATEWAY_TOKEN", "").strip())
+    ig_proxy_configured = bool(scraper._IG_PROXY_URL)
+    gateway_available = gateway_configured and (
+        gateway_token_configured or not scraper._CUSTOM_GATEWAYS_CONFIGURED
+    )
+    live = (
+        scraper.DATA_MODE == "live"
+        and (
+            bool(scraper.APIFY_TOKENS)
+            or scraper._has_graph_credentials()
+            or gateway_available
+        )
+    )
     pool = scraper.apify_token_pool_status()
     healthy_tokens = sum(1 for t in pool if t["status"] == "ready" and not t["benched"])
-    if pool and healthy_tokens == 0:
+    if scraper.DATA_MODE == "live" and not (
+        bool(scraper.APIFY_TOKENS) or scraper._has_graph_credentials()
+    ):
+        if gateway_configured and not gateway_token_configured:
+            live_note = (
+                "IG_GATEWAY_URLS is configured, but IG_GATEWAY_TOKEN is missing. "
+                "Set IG_GATEWAY_TOKEN in Render to the exact RELAY_TOKEN secret "
+                "configured in the Cloudflare Worker; otherwise the relay returns "
+                "HTTP 401. IG_PROXY_URL is optional and only affects direct "
+                "Instagram HTTP/Chrome requests."
+            )
+        elif gateway_configured:
+            live_note = (
+                "Live mode uses the configured Instagram relay. IG_PROXY_URL is "
+                "available for direct Instagram HTTP/Chrome requests if the relay "
+                "is unavailable."
+            )
+        else:
+            live_note = (
+                "Live mode has NO data provider configured: APIFY_TOKEN is unset "
+                "(no Graph API credentials either), so real fetches depend on the "
+                "keyless direct Instagram fetch — which Instagram blocks on "
+                "datacenter IPs (Render/Railway/Fly get 401/429 on every call). "
+                "Fix: add APIFY_TOKEN in the service's environment (free Apify "
+                "account → Settings → API & Integrations; every free account gets "
+                "$5/month of actor credit), or set IG_GATEWAY_URLS to your own "
+                "Cloudflare-Worker relay (see cloudflare-worker/ig-relay.js) for "
+                "the keyless path to work from blocked hosts. Locally, real data "
+                "works without any token from residential IPs."
+            )
+    elif pool and healthy_tokens == 0:
         live_note = (
             "Every Apify token in the pool is benched (credit exhausted or "
             "rejected). Fetches automatically fall back to the keyless direct "
@@ -443,10 +489,17 @@ def data_source_info():
         "ai_provider": "nvidia-nim" if ai_engine.LLM_API_KEY else "rule-based-fallback",
         "cached_profiles": cached_profiles,
         "apify_tokens": pool,
-        "note": live_note if live else (
-            "Real Instagram data is served from the local cache of past "
-            "fetches; unknown handles get clearly-badged simulated data. "
-            "All AI analysis runs on the NVIDIA NIM API."
+        "ig_gateway_configured": gateway_configured,
+        "ig_gateway_token_configured": gateway_token_configured,
+        "ig_proxy_configured": ig_proxy_configured,
+        "note": (
+            live_note
+            if (live or (scraper.DATA_MODE == "live" and not pool))
+            else (
+                "Real Instagram data is served from the local cache of past "
+                "fetches; unknown handles get clearly-badged simulated data. "
+                "All AI analysis runs on the NVIDIA NIM API."
+            )
         ),
     }
 
@@ -1599,6 +1652,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     context_used: bool = False
+    llm_used: bool = False   # False = rule-based fallback answered (diagnosability)
 
 
 def _parse_context(context: Optional[str]) -> dict:
@@ -1708,38 +1762,37 @@ async def chat(req: ChatRequest):
 
     if llm is not None:
         try:
-            from langchain_core.prompts import ChatPromptTemplate
-
-            prompt = ChatPromptTemplate.from_messages([
-                ("system",
-                 "You are an Instagram growth analyst. Answer the user's question "
-                 "concisely and concretely. If context about an account is provided, "
-                 "ground your answer in that data. Never invent numbers."),
-                ("human",
-                 "Account context (may be empty):\n{context}\n\n"
-                 "Question:\n{message}\n\n"
-                 "Answer:"),
-            ])
-            chain = prompt | llm
             ctx_text = req.context or ""
             if live:
                 ctx_text = (
                     ctx_text + "\n" +
                     "\n".join(f"{k}: {v}" for k, v in live.items() if not k.startswith("_"))
                 ).strip()
-            # Offload: chain.invoke is a blocking HTTP round-trip; running it
-            # inline would freeze every other endpoint for the duration.
-            answer = await asyncio.get_event_loop().run_in_executor(
-                _LLM_POOL,
-                lambda: chain.invoke({"context": ctx_text or "(no account data)", "message": req.message}),
+            # _invoke_llm: per-model failover + error capture, off the event loop.
+            # 45s total (2 attempts x ~22s): chat must not hang longer than that
+            # when the primary model is congested — the fallbacks answer faster.
+            answer = await ai_engine._invoke_llm(
+                lambda client: ai_engine._bind_chat_prompt(client, ctx_text, req.message),
+                timeout=45,
             )
-            return ChatResponse(answer=str(answer.content or answer), context_used=bool(req.context or live))
+            return ChatResponse(
+                answer=str(answer.content or answer),
+                context_used=bool(req.context or live),
+                llm_used=True,
+            )
         except Exception as e:
-            ai_engine._llm_trip_breaker(f"chat chain failed: {str(e)[:80]}")
+            print(f"[chat] LLM unavailable, rule-based fallback: {type(e).__name__}: {str(e)[:120]}", flush=True)
 
     # Fallback: rule-based responder using live and/or insight data if available.
     answer = _rule_based_chat(req.message, req.context, live, live_err)
-    return ChatResponse(answer=answer, context_used=bool(req.context or live))
+    return ChatResponse(answer=answer, context_used=bool(req.context or live), llm_used=False)
+
+
+@app.get("/api/ai-status")
+async def ai_status():
+    """Why is the AI (not) answering? Configuration, failover candidates,
+    circuit-breaker state and the last provider error — one honest snapshot."""
+    return ai_engine.llm_status()
 
 
 def _rule_based_chat(message: str, context: Optional[str], live: Optional[dict] = None, live_err: str = "") -> str:

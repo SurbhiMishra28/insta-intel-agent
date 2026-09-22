@@ -33,3 +33,18 @@ frontend/dev-dist/
 
 # Profile data store
 backend/profile_datastore.db
+
+# Wrangler local state
+.wrangler/
+cloudflare-worker/.relay-token.local
+
+# Local test/Diagnostic artifacts
+frontend/_uitest/*.png
+frontend/_uitest/*.txt
+frontend/_uitest/*.json
+backend/_*.txt
+backend/_*.json
+backend/uvicorn_*.log
+.env.local
+frontend/vite_preview.log
+frontend/vite.log
