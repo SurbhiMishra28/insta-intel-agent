@@ -2760,6 +2760,11 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
     }
     last = "no gateways configured"
     token = os.getenv("IG_GATEWAY_TOKEN", "").strip()
+    # Instagram challenges the relay's egress IPs intermittently ("require_login"
+    # 401s come and go per edge isolate/session), so a single attempt per gateway
+    # wastes a working path. Retry each gateway a few times with jittered
+    # backoff — measured ~25% per-shot success becomes ~70%+ per request.
+    gw_retries = max(1, int(os.getenv("IG_GATEWAY_RETRIES", "4")))
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(25.0), follow_redirects=True,
         proxy=_ig_httpx_proxy(),
@@ -2769,10 +2774,22 @@ async def _fetch_gw_profile(username: str) -> ProfileData:
             url = tmpl.format(q=quote(endpoint, safe=""))
             if token and "?" in url:
                 url += "&token=" + quote(token, safe="")
-            try:
-                resp = await client.get(url, headers=headers)
-            except httpx.HTTPError as e:
-                last = f"{host}: {str(e)[:60]}"
+            resp = None
+            for attempt in range(gw_retries):
+                try:
+                    resp = await client.get(url, headers=headers)
+                except httpx.HTTPError as e:
+                    last = f"{host}: {str(e)[:60]}"
+                    resp = None
+                    break  # transport error: retrying the same gateway won't help
+                if resp.status_code == 200:
+                    break
+                last = f"{host}: HTTP {resp.status_code}"
+                if resp.status_code in (400, 401, 403) and attempt < gw_retries - 1:
+                    # challenge/rate-limit style failure — back off and re-roll
+                    # the dice on a different edge session
+                    await asyncio.sleep(0.8 * (attempt + 1) + random.uniform(0, 0.6))
+            if resp is None or resp.status_code != 200:
                 continue
             if resp.status_code != 200:
                 detail = ""
