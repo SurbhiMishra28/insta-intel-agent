@@ -2732,7 +2732,8 @@ _PUBLIC_GATEWAYS = (
     "https://api.allorigins.win/raw?url={q}",
     "https://corsproxy.io/?url={q}",
     "https://api.codetabs.com/v1/proxy?quest={q}",
-    "https://r.jina.ai/{q}",
+    # r.jina.ai removed: it now 403s Instagram targets outright (needs API key),
+    # so it only added latency and became the misleading "last error" shown.
 )
 _GATEWAY_URLS_ENV = os.getenv("IG_GATEWAY_URLS", "").strip()
 _GATEWAY_TEMPLATES = tuple(
