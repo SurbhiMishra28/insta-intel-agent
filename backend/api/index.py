@@ -1,13 +1,15 @@
 # Vercel serverless entrypoint: mounts the FastAPI app on the Python runtime.
 # The @vercel/python builder auto-detects the module-level ASGI `app` and wraps
-# it — no adapter needed. DB paths move to /tmp (the only writable directory
-# on Vercel) BEFORE the backend modules import; storage resets per deployment.
+# it — no adapter needed. The Vercel project root is backend/ itself, so the
+# flat modules (main.py, scraper.py, ...) are bundled at the lambda root
+# (/var/task) and /tmp is the only writable directory (DB paths point there;
+# storage resets per deployment).
 import os
 import sys
 
-BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+# api/index.py -> api/ -> project root, where the flat backend modules live.
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# /tmp is the only writable location on Vercel's lambda filesystem.
 os.environ.setdefault("PROFILE_CACHE_DB", "/tmp/profile_cache.db")
 os.environ.setdefault("SCAN_HISTORY_DB", "/tmp/scan_history.db")
 
