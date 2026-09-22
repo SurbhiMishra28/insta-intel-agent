@@ -1,0 +1,14 @@
+# Keep root-context Docker builds (see ./Dockerfile) small and hermetic.
+.git
+.github
+frontend
+cloudflare-worker
+docs
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/_uitest
+**/*.log
+**/.env*
+**/.vercel
+**/.wrangler
