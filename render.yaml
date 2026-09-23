@@ -30,12 +30,15 @@ services:
     autoDeploy: true
     envVars:
       - key: LLM_API_KEY
-        sync: false          # set in dashboard: NVIDIA NIM key
+        sync: false          # set in dashboard: OpenRouter key (sk-or-v1-...)
+      - key: LLM_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: LLM_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b:free
       - key: APIFY_TOKEN
-        sync: false          # optional; keyless fallback works without it
+        sync: false          # optional; keyless Playwright provider works without it
       - key: IG_PROXY_URL
         sync: false          # optional; residential proxy for IG fetches
-        value: live
       # Headless Chromium (keyless Playwright provider) tuning on a small container.
       - key: IG_CHROME_FETCH
         value: "true"
@@ -43,4 +46,3 @@ services:
         value: "playwright"
       - key: IG_PERMALINK_POSTS
         value: "4"
-        value: "false"
