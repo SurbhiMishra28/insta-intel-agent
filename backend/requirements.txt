@@ -8,5 +8,6 @@ sqlalchemy==2.0.35
 openai>=1.59,<2
 langchain-core>=0.3,<0.4
 langchain-openai>=0.2,<0.3
-streamlit>=1.64
-pandas>=2.2
+# NOTE: streamlit/pandas intentionally NOT here — the Streamlit UI is a
+# separate deployable (streamlit_app.py + root requirements.txt) and
+# streamlit's starlette>=0.46 pin conflicts with fastapi's starlette<0.39.
