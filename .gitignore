@@ -31,12 +31,12 @@ backend/_verify_*.json
 # Vite PWA dev artifacts
 frontend/dev-dist/
 
+# Cloudflare Tunnel local artifacts
+cloudflared.log
+.cloudflared/
+
 # Profile data store
 backend/profile_datastore.db
-
-# Wrangler local state
-.wrangler/
-cloudflare-worker/.relay-token.local
 
 # Local test/Diagnostic artifacts
 frontend/_uitest/*.png
@@ -48,3 +48,8 @@ backend/uvicorn_*.log
 .env.local
 frontend/vite_preview.log
 frontend/vite.log
+
+
+# Streamlit runtime
+streamlit.log
+.streamlit/secrets.toml

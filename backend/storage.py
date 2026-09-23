@@ -51,9 +51,9 @@ def _now() -> str:
 def record_scan(insight: ProfileInsight) -> None:
     """Insert one scan row (best-effort: persistence must never break the API).
 
-    REAL HISTORY ONLY: simulated profiles carry the badge
-    `data_age_hours == -1` and are refused — growth tracking must never
-    build trends out of invented numbers."""
+    All data in this system is real (fetched from Instagram); the
+    `data_age_hours == -1` simulated badge is a legacy no-op guard kept so a
+    stray badged row can never enter growth tracking."""
     try:
         if getattr(insight.profile, "data_age_hours", None) == -1:
             return  # simulated — never record

@@ -23,7 +23,8 @@ cd instaiq/backend
 
 ```bash
 cp env.aapanel.example .env
-nano .env        # fill LLM_API_KEY, IG_GATEWAY_TOKEN (already prefilled), etc.
+nano .env        # fill LLM_API_KEY, etc. (no Instagram token needed)
+playwright install chromium   # one-time: browser for the keyless IG fetch
 ```
 
 ## 4. Dependencies

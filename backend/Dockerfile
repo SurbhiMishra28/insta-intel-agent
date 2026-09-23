@@ -1,19 +1,20 @@
 FROM python:3.11-slim
 
-# Chromium powers the keyless direct-fetch fallback (real Instagram data
-# when the Apify pool is exhausted); fonts keep rendered pages natural.
+# Playwright Chromium powers the keyless direct-fetch path (real Instagram
+# data fetched from inside a real browser page — no relay, no tokens);
+# fonts keep rendered pages natural.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium fonts-liberation \
+        fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-ENV IG_CHROME_PATH=/usr/bin/chromium \
-    IG_CHROME_FETCH=true \
-    PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install --with-deps chromium
 
 COPY . .
 

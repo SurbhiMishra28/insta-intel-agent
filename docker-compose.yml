@@ -7,10 +7,10 @@ services:
       - "8000:8000"
     environment:
       # Compose reads these from your shell or from a .env file next to
-      # docker-compose.yml (see .env.example in backend/ for the full list).
-      # live = real Instagram data via Apify (needs APIFY_TOKEN); cache =
-      # local cache only; demo = simulated data.
-      - DATA_MODE=${DATA_MODE:-live}
+      # docker-compose.yml (see backend/.env.example for the full list).
+      # live = real Instagram data via the keyless Playwright Chromium
+      # provider (or Apify when APIFY_TOKEN is set); cache = local cache only;
+      # demo = simulated data.
       - APIFY_TOKEN=${APIFY_TOKEN:-}
       - APIFY_ACTOR_ID=${APIFY_ACTOR_ID:-apify/instagram-scraper}
       - APIFY_RUN_TIMEOUT=${APIFY_RUN_TIMEOUT:-300}
@@ -18,16 +18,17 @@ services:
       - FALLBACK_TO_DEMO=${FALLBACK_TO_DEMO:-false}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
-      - LLM_MODEL=${LLM_MODEL:-minimax/minimax-m3}
+      - LLM_MODEL=${LLM_MODEL:-openai/gpt-oss-20b}
     restart: unless-stopped
 
   frontend:
     build:
-      context: ./frontend
-      args:
-        VITE_API_URL: http://localhost:8000
+      context: .
+      dockerfile: Dockerfile.streamlit
     ports:
-      - "3000:80"
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
     depends_on:
       - backend
     restart: unless-stopped

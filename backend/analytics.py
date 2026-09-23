@@ -703,9 +703,8 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
     fallback = _rule_based_bio(insight)
 
     try:
-        from ai_engine import _get_llm, _profile_facts, _llm_available, _llm_trip_breaker, _llm_note_success, _structured
-        llm = _get_llm() if _llm_available() else None
-        if llm is None:
+        from ai_engine import _profile_facts, _llm_available, _invoke_llm_sync, _structured
+        if not _llm_available():
             return fallback
         from langchain_core.prompts import ChatPromptTemplate
 
@@ -719,20 +718,23 @@ def optimize_bio(insight: ProfileInsight) -> BioOptimizer:
              "Rewrite it: line 1 = who/what, line 2 = value for the follower, "
              "line 3 = proof, line 4 = CTA. Keep it honest and specific to this account."),
         ])
-        chain = prompt | _structured(llm, BioOptimizer)
-        result: BioOptimizer = chain.invoke({
-            "facts": _profile_facts(insight.profile, insight.metrics),
-            "bio": insight.profile.bio or "(empty)",
-        })
+
+        def _run(client):
+            chain = prompt | _structured(client, BioOptimizer)
+            return chain.invoke({
+                "facts": _profile_facts(insight.profile, insight.metrics),
+                "bio": insight.profile.bio or "(empty)",
+            })
+
+        result: BioOptimizer = _invoke_llm_sync(_run)
         if result.suggested_bio:
             result.current_bio = insight.profile.bio or ""
             if not result.notes:
                 result.notes = fallback.notes
-            _llm_note_success()
             return result
         return fallback
     except Exception as e:
-        _llm_trip_breaker(f"bio optimizer failed: {str(e)[:80]}")
+        print(f"[ai] bio optimizer: rule-based fallback ({str(e)[:110]})", flush=True)
         return fallback
 
 
@@ -973,11 +975,11 @@ def build_monthly_review(
             "Scans span less than a week — monthly patterns aren't visible yet. "
             "Keep scanning weekly to build a meaningful trend."
         )
-    # Check if all scans have identical values (likely demo mode or no real change)
+    # Check if all scans have identical values (no real change between scans)
     if all(r.followers == first.followers for r in records):
         warnings.append(
-            "Follower count is identical across all scans — this may indicate demo data mode "
-            "or a period with no follower growth. Real live data will show variation over time."
+            "Follower count is identical across all scans — no measurable change "
+            "in this period. Keep scanning to build a meaningful trend."
         )
 
     return MonthlyReviewResponse(

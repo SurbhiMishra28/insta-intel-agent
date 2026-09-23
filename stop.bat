@@ -3,7 +3,7 @@ setlocal
 title InstaIQ - Stop
 
 REM ============================================================
-REM  InstaIQ - stop backend (port 8000) + frontend (port 5173)
+REM  InstaIQ - stop backend (port 8000) + React UI (port 5173)
 REM  Double-click in Explorer, or run from a terminal: stop.bat
 REM ============================================================
 
@@ -19,7 +19,7 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":8000
 )
 
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr "LISTENING" ^| findstr ":5173"') do (
-    echo   [stop] Frontend ^(PID %%p^)
+    echo   [stop] React UI ^(PID %%p^)
     taskkill /PID %%p /F >nul 2>&1
     set "KILLED=1"
 )

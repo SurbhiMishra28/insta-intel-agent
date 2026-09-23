@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtCompact } from '../format.js';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || ''; // '' = same-origin (vite dev proxy)
 
 export default function ChatBox({ context }) {
   const [open, setOpen] = useState(false);

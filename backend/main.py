@@ -90,9 +90,10 @@ app = FastAPI(
     description=(
         "Analyzes an Instagram profile, auto-discovers and researches its "
         "strongest competitors, and produces an AI-written competitive "
-        "intelligence report. Runs entirely on the NVIDIA NIM API: real "
-        "profile data is served from the local cache of past fetches, and "
-        "unknown handles get clearly-badged simulated data."
+        "intelligence report. All profile data is REAL — fetched via the "
+        "official Graph API (when configured), Apify (when configured), or "
+        "the keyless Playwright Chromium headless provider. Unknown handles "
+        "return an honest 400, never simulated numbers."
     ),
     version="3.0.0",
 )
@@ -111,12 +112,9 @@ def root():
     return {
         "status": "ok",
         "service": "insta-intel-agent",
-        "data_mode": scraper.DATA_MODE,
-        "data_source": (
-            "Apify live fetch + local cache" if scraper.DATA_MODE == "live"
-            else "local-cache + NVIDIA-only AI"
-        ),
-        "ai_engine": "langchain" if ai_engine.LLM_API_KEY else "rule-based-fallback",
+        "data_mode": "live (real data only)",
+        "data_source": "Graph API / Apify / keyless Playwright Chromium + local cache",
+        "ai_engine": ai_engine.ai_provider_label(),
     }
 
 
@@ -411,55 +409,22 @@ def data_source_info():
             ).fetchone()[0]
     except Exception:
         pass
-    # In live mode, the backend can use Apify, the official Graph API, or a
-    # configured relay. Without one of those providers, Render's datacenter IP
-    # is normally blocked by Instagram's direct endpoints.
-    gateway_configured = scraper._CUSTOM_GATEWAYS_CONFIGURED
-    gateway_token_configured = bool(os.getenv("IG_GATEWAY_TOKEN", "").strip())
-    ig_proxy_configured = bool(scraper._IG_PROXY_URL)
-    gateway_available = gateway_configured and (
-        gateway_token_configured or not scraper._CUSTOM_GATEWAYS_CONFIGURED
-    )
-    live = (
-        scraper.DATA_MODE == "live"
-        and (
-            bool(scraper.APIFY_TOKENS)
-            or scraper._has_graph_credentials()
-            or gateway_available
-        )
-    )
+    # Live mode is tokenless when no Apify tokens AND no Graph credentials
+    # are configured — the app then depends entirely on the keyless direct
+    # fetch, which datacenter IPs (Render/Railway/Fly) cannot use because
+    # Instagram hard-blocks them. Surface that honestly so "real data is
+    # not fetching" reports can be diagnosed from this endpoint alone.
+    live = bool(scraper.APIFY_TOKENS) or scraper._has_graph_credentials() or scraper.DIRECT_FETCH_ENABLED
     pool = scraper.apify_token_pool_status()
     healthy_tokens = sum(1 for t in pool if t["status"] == "ready" and not t["benched"])
-    if scraper.DATA_MODE == "live" and not (
-        bool(scraper.APIFY_TOKENS) or scraper._has_graph_credentials()
-    ):
-        if gateway_configured and not gateway_token_configured:
-            live_note = (
-                "IG_GATEWAY_URLS is configured, but IG_GATEWAY_TOKEN is missing. "
-                "Set IG_GATEWAY_TOKEN in Render to the exact RELAY_TOKEN secret "
-                "configured in the Cloudflare Worker; otherwise the relay returns "
-                "HTTP 401. IG_PROXY_URL is optional and only affects direct "
-                "Instagram HTTP/Chrome requests."
-            )
-        elif gateway_configured:
-            live_note = (
-                "Live mode uses the configured Instagram relay. IG_PROXY_URL is "
-                "available for direct Instagram HTTP/Chrome requests if the relay "
-                "is unavailable."
-            )
-        else:
-            live_note = (
-                "Live mode has NO data provider configured: APIFY_TOKEN is unset "
-                "(no Graph API credentials either), so real fetches depend on the "
-                "keyless direct Instagram fetch — which Instagram blocks on "
-                "datacenter IPs (Render/Railway/Fly get 401/429 on every call). "
-                "Fix: add APIFY_TOKEN in the service's environment (free Apify "
-                "account → Settings → API & Integrations; every free account gets "
-                "$5/month of actor credit), or set IG_GATEWAY_URLS to your own "
-                "Cloudflare-Worker relay (see cloudflare-worker/ig-relay.js) for "
-                "the keyless path to work from blocked hosts. Locally, real data "
-                "works without any token from residential IPs."
-            )
+    if not live:
+        live_note = (
+            "Live mode fetches real Instagram data with zero credentials via "
+            "the keyless Playwright Chromium provider: a real headless browser "
+            "opens instagram.com and reads Instagram's own web_profile_info "
+            "JSON from inside the page, so no relay/token is involved. "
+            "Apify tokens (optional) are used first when configured."
+        )
     elif pool and healthy_tokens == 0:
         live_note = (
             "Every Apify token in the pool is benched (credit exhausted or "
@@ -474,33 +439,22 @@ def data_source_info():
             f"Real Instagram data is fetched live via the Apify API with "
             f"{len(pool)}-token failover ({healthy_tokens} ready); fetches are "
             "cached locally, so repeat analyses are instant and free. "
-            "All AI analysis runs on the NVIDIA NIM API."
+            f"AI analysis runs on {ai_engine.ai_provider_label()}."
         )
     else:
         live_note = (
             "Real Instagram data is fetched live via the Apify API and "
             "cached locally, so repeat analyses are instant and free. "
-            "All AI analysis runs on the NVIDIA NIM API."
+            f"AI analysis runs on {ai_engine.ai_provider_label()}."
         )
     return {
         "ok": True,
         "source": "live" if live else "cache",
-        "data_mode": scraper.DATA_MODE,
-        "ai_provider": "nvidia-nim" if ai_engine.LLM_API_KEY else "rule-based-fallback",
+        "data_mode": "live (real data only)",
+        "ai_provider": ai_engine.ai_provider_label(),
         "cached_profiles": cached_profiles,
         "apify_tokens": pool,
-        "ig_gateway_configured": gateway_configured,
-        "ig_gateway_token_configured": gateway_token_configured,
-        "ig_proxy_configured": ig_proxy_configured,
-        "note": (
-            live_note
-            if (live or (scraper.DATA_MODE == "live" and not pool))
-            else (
-                "Real Instagram data is served from the local cache of past "
-                "fetches; unknown handles get clearly-badged simulated data. "
-                "All AI analysis runs on the NVIDIA NIM API."
-            )
-        ),
+        "note": live_note,
     }
 
 
@@ -537,14 +491,9 @@ def delete_search_history(username: str):
 
 
 def _data_quality_warning(insight: ProfileInsight) -> str:
-    """Human-readable note when the served profile data is simulated or an
-    incomplete cache row."""
+    """Human-readable note when the served profile data is an incomplete
+    cache row. Simulated data does not exist in this system."""
     p = insight.profile
-    if scraper.is_demo_row(insight.profile):
-        return (
-            f"@{p.username}: no cached real data for this handle yet — showing "
-            "SIMULATED data so the analysis still works. Numbers are not real."
-        )
     problems = []
     if p.followers == 0:
         problems.append("follower count")
@@ -1724,9 +1673,8 @@ async def chat(req: ChatRequest):
             profile = await scraper.get_profile(handle)
             metrics = ai_engine.compute_metrics(profile)
             # Growth tracking: every real fetch of a handle is a timeline
-            # point (skipped for simulated data — history stays real-only).
-            if getattr(profile, "data_age_hours", None) != -1:
-                storage.record_metrics(
+            # point (all data is real in this system — history stays real).
+            storage.record_metrics(
                     profile.username,
                     followers=profile.followers,
                     engagement_rate=metrics.engagement_rate,
@@ -1769,11 +1717,14 @@ async def chat(req: ChatRequest):
                     "\n".join(f"{k}: {v}" for k, v in live.items() if not k.startswith("_"))
                 ).strip()
             # _invoke_llm: per-model failover + error capture, off the event loop.
-            # 45s total (2 attempts x ~22s): chat must not hang longer than that
-            # when the primary model is congested — the fallbacks answer faster.
+            # Chat keeps a bounded budget so a congested provider can't hang
+            # the surface: total 30s / 15s per model. (A previous 12s/6s
+            # budget made LLM chat mathematically unable to succeed — NVIDIA
+            # NIM needs ~9-60s per call even when healthy.) The rule-based
+            # fallback still answers instantly if both models miss it.
             answer = await ai_engine._invoke_llm(
                 lambda client: ai_engine._bind_chat_prompt(client, ctx_text, req.message),
-                timeout=45,
+                timeout=float(os.getenv("LLM_CHAT_TIMEOUT", "30")),
             )
             return ChatResponse(
                 answer=str(answer.content or answer),

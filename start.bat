@@ -3,7 +3,7 @@ setlocal
 title InstaIQ - Launcher
 
 REM ============================================================
-REM  InstaIQ - start backend (FastAPI) + frontend (Vite)
+REM  InstaIQ - start backend (FastAPI) + frontend (React/Vite)
 REM  Double-click in Explorer, or run from a terminal: start.bat
 REM  Safe to run repeatedly - already-running services are skipped.
 REM ============================================================
@@ -17,12 +17,6 @@ echo   ---------------------------
 where python >nul 2>&1
 if errorlevel 1 (
     echo   [error] Python not found on PATH. Install Python 3.11+ first.
-    pause
-    exit /b 1
-)
-where npm >nul 2>&1
-if errorlevel 1 (
-    echo   [error] npm not found on PATH. Install Node.js 18+ first.
     pause
     exit /b 1
 )
@@ -41,24 +35,23 @@ if %errorlevel%==0 (
     start "InstaIQ backend" /MIN /D "%ROOT%backend" cmd /c "python -m uvicorn main:app --host 127.0.0.1 --port 8000 > uvicorn.log 2>&1"
 )
 
-REM --- Frontend (Vite dev server on port 5173) -----------------
+REM --- Frontend (React/Vite on port 5173) ----------------------
 netstat -ano | findstr "LISTENING" | findstr ":5173" >nul 2>&1
 if %errorlevel%==0 (
-    echo   [skip] Frontend already running on port 5173
+    echo   [skip] React UI already running on port 5173
 ) else (
-    echo   [start] Frontend: checking dependencies, then launching...
     if not exist "%ROOT%frontend\node_modules" (
-        echo           Installing frontend dependencies ^(one-time, a few minutes^)...
-        pushd "%ROOT%frontend"
-        call npm install
-        popd
+        echo   [start] Installing frontend dependencies ^(one-time^)...
+        cd /d "%ROOT%frontend" && call npm install --no-audit --no-fund > npm-install.log 2>&1
+        cd /d "%ROOT%"
     )
-    start "InstaIQ frontend" /MIN /D "%ROOT%frontend" cmd /c "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > vite.log 2>&1"
+    echo   [start] React UI: launching vite dev server...
+    start "InstaIQ UI" /MIN /D "%ROOT%frontend" cmd /c "npm run dev > vite.log 2>&1"
 )
 
 REM --- Wait, then verify ---------------------------------------
 echo   [wait]  Giving services a few seconds to boot...
-timeout /t 8 /nobreak >nul
+timeout /t 10 /nobreak >nul
 
 set "BACKEND_OK=0"
 set "FRONTEND_OK=0"
@@ -69,8 +62,8 @@ if not errorlevel 1 (
 )
 
 echo.
-if "%BACKEND_OK%"=="1" (echo   [ ok ] Backend  http://localhost:8000   ^(API docs at /docs^)) else (echo   [ !! ] Backend not responding - see backend\uvicorn.log)
-if "%FRONTEND_OK%"=="1" (echo   [ ok ] Frontend http://localhost:5173) else (echo   [ !! ] Frontend not responding - see frontend\vite.log)
+if "%BACKEND_OK%"=="1" (echo   [ ok ] Backend   http://localhost:8000   ^(API docs at /docs^)) else (echo   [ !! ] Backend not responding - see backend\uvicorn.log)
+if "%FRONTEND_OK%"=="1" (echo   [ ok ] React UI  http://localhost:5173) else (echo   [ !! ] React UI not responding - see frontend\vite.log)
 
 start "" http://localhost:5173
 echo.

@@ -21,7 +21,7 @@ import ChatBox from './components/ChatBox.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
 import RestoreView from './components/RestoreView.jsx';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || ''; // '' = same-origin (vite dev proxy)
 
 function previewHandle(raw) {
   const t = (raw || '').trim();

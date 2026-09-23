@@ -1,0 +1,6 @@
+# InstaIQ — Streamlit Cloud UI requirements
+# (Deployed app: streamlit_app.py. The FastAPI backend deploys separately —
+#  its dependencies are backend/requirements.txt.)
+streamlit>=1.64
+pandas>=2.0
+httpx>=0.27

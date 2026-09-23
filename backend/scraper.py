@@ -1,44 +1,40 @@
 """
-Data acquisition layer for Instagram profile data.
+Data acquisition layer for Instagram profile data — REAL DATA ONLY.
 
-Data modes (DATA_MODE env var):
+Every number served comes from a real source:
 
-  - "live" (default): real public profile data fetched via Apify's
-    Instagram Scraper actor (apify/instagram-scraper) — profile fields +
-    the ~12 latest posts with real likes, comments, timestamps and media
-    types. Requires at least one Apify token (APIFY_TOKEN, with optional
-    APIFY_TOKEN_2..9 / APIFY_TOKENS failover). Every successful fetch is
-    persisted to the local SQLite cache, so repeats are instant and free.
+  - Provider #0: official Instagram Graph API (business_discovery) when
+    Graph credentials are configured.
+  - Provider #1: Apify's Instagram Scraper actor when APIFY_TOKEN(s) are
+    configured (profile fields + ~12 latest posts with real likes,
+    comments, timestamps and media types).
+  - Provider #2: keyless Playwright Chromium headless — a real browser
+    opens instagram.com and reads Instagram's own web_profile_info JSON
+    from inside the page (same origin, cookies and TLS fingerprint as the
+    site's frontend). No token, no login, no relay.
+  - Provider #3: keyless HTTP ladder (direct web_profile_info GET with
+    bootstrap cookies + CDP-rendered page GraphQL capture).
 
-    Provider #2 (keyless): when the Apify pool is exhausted/benched or no
-    token is configured at all, real data still flows from Instagram's own
-    web_profile_info endpoint (the same GET instagram.com's frontend makes,
-    authenticated only by the public x-ig-app-id header — no account, no
-    API key). Live failures then surface honestly; a badged simulated row
-    is served only in non-live modes or with FALLBACK_TO_DEMO=true.
-  - "cache": serve only cached real data; unknown handles get
-    clearly-badged simulated data (data_age_hours = -1). No network calls.
-  - "demo": everything simulated (offline development).
+All successful fetches are persisted to the local SQLite cache, so
+repeats are instant and free.
 
-Latency layers in live mode, per handle:
+Latency layers, per handle:
 
   1. in-memory TTL cache (instant, per-process)
   2. persistent SQLite disk cache (instant, survives restarts)
-  3. Apify actor run (10–60s; batched — N rivals cost ONE run)
+  3. live providers in order (Graph → Apify → keyless)
 
-Live failures fail loudly (RuntimeError → HTTP 503) unless
-FALLBACK_TO_DEMO=true, in which case badged simulated data is served.
+Failures fail loudly and honestly: ValueError → HTTP 400 (handle does not
+exist), RuntimeError → HTTP 503 (every provider blocked). Simulated/demo
+data is never generated and never served.
 
-Competitor discovery (live mode): Instagram's own related-accounts signal
-(usually captured free during the main profile fetch), with a keyword
-search over Instagram users as fallback — plus local cache mining
-(mentions/hashtag overlap), which runs first and is completely free.
+Competitor discovery: local cache mining (mentions/hashtag overlap —
+free), Instagram's related-accounts signal, and a keyword search over
+Instagram users as fallback.
 """
 import asyncio
-import hashlib
 import json
 import os
-import random
 import re
 import sqlite3
 import threading
@@ -66,14 +62,15 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 from models import Post, ProfileData
 
-DATA_MODE = os.getenv("DATA_MODE", "live").lower()  # "live" | "cache" | "demo"
+# Live real-data mode is the only mode: every fetch goes to a real
+# provider (Graph API / Apify / keyless Playwright + HTTP ladder) and
+# failures surface honestly. Simulated/demo data was removed by design.
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip()
 APIFY_ACTOR_ID = os.getenv("APIFY_ACTOR_ID", "apify/instagram-scraper")
 APIFY_SEARCH_ACTOR_ID = os.getenv("APIFY_SEARCH_ACTOR_ID", "apify/instagram-search-scraper")
 APIFY_RUN_TIMEOUT = int(os.getenv("APIFY_RUN_TIMEOUT", "300"))  # seconds
-# Default false: a failed live fetch must fail loudly (503/502) rather than
-# silently serve fake data. Opt in to demo fallback explicitly.
-FALLBACK_TO_DEMO = os.getenv("FALLBACK_TO_DEMO", "false").lower() in ("1", "true", "yes")
+# A failed fetch must fail loudly (503/400) rather than ever serve fake
+# data — the demo fallback that used to exist here was removed by design.
 
 # --- Official Instagram Graph API (business_discovery) — provider #0 ------
 # When configured, real data comes from Meta's ToS-compliant API instead of
@@ -864,7 +861,7 @@ def _require_apify_token() -> None:
     if not APIFY_TOKENS:
         raise RuntimeError(
             "No Apify token configured — set APIFY_TOKEN in backend/.env "
-            "(or switch DATA_MODE=demo for simulated data)."
+            "(the keyless Playwright Chromium provider works without one)."
         )
 
 
@@ -1401,6 +1398,25 @@ def _find_chrome() -> Optional[str]:
     for p in candidates:
         if p and os.path.isfile(p):
             return p
+    # Playwright's managed Chromium (`playwright install chromium`) — the
+    # keyless provider's preferred browser, also usable by the dump/CDP
+    # helpers when no system Chrome exists.
+    try:
+        import glob as _glob
+        base = (
+            os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
+            or (os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright") if os.name == "nt"
+                else os.path.expanduser("~/.cache/ms-playwright"))
+        )
+        patterns = ("chromium-*/chrome-win*/chrome.exe",) if os.name == "nt" \
+            else ("chromium-*/chrome-linux/chrome",)
+        hits: List[str] = []
+        for pat in patterns:
+            hits.extend(_glob.glob(os.path.join(base, pat)))
+        if hits:
+            return sorted(hits)[-1]  # highest installed build
+    except Exception:
+        pass
     return None
 
 
@@ -2532,6 +2548,21 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     when Instagram blocks/rate-limits every attempt."""
     perf = _Perf(f"direct @{username}")
     global _api_block_until
+    # Provider #3 (Playwright Chromium) runs FIRST: a real browser context is
+    # the strongest keyless path on any IP — the in-page web_profile_info
+    # query rides the page's own session/fingerprint, exactly like the site's
+    # own frontend. IG_FETCH_MODE=off (or http) skips it and uses the raw
+    # HTTP ladder below.
+    if (
+        os.getenv("IG_FETCH_MODE", "playwright").lower() == "playwright"
+        and _playwright_available()
+    ):
+        try:
+            pw_profile = await _fetch_playwright_profile(username)
+            perf.stage("playwright provider OK")
+            return pw_profile
+        except (RuntimeError, httpx.HTTPError) as e:
+            perf.stage(f"playwright provider failed: {str(e)[:90]}")
     # Recently blocked (401/403/429)? Don't abort — go straight to the
     # in-page GraphQL provider: a real browser context is the most likely
     # path to real data on this IP, while the JSON ladder below is doomed
@@ -2710,151 +2741,295 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
 
 
 # ---------------------------------------------------------------------------
-# Provider #3: Instagram JSON via public render gateways (no tokens)
+# Provider #3: Instagram JSON via Playwright Chromium headless (no tokens)
 #
-# Datacenter hosts (Render/Railway/Fly shared IPs) are hard-blocked by
-# Instagram: 401/429 on every API endpoint AND bot challenges for headless
-# Chrome renders. The block is per-IP, not per-client — the JSON payloads
-# themselves are fine when requested from a tolerated IP. Public "render
-# gateway" services fetch a URL server-side from THEIR IPs and stream the
-# body back, so the same web_profile_info call that works from residential
-# IPs works here. The response is the exact data.user shape the direct API
-# path parses — EXACT follower counts + the 12 most recent posts with real
-# likes/comments. Zero credentials, zero login.
+# A REAL browser (Playwright's managed Chromium, or any Chrome found on the
+# host) opens instagram.com and runs Instagram's own web_profile_info query
+# FROM INSIDE the page — same origin, same cookies, same TLS/header
+# fingerprint as the site's frontend. That is exactly how instagram.com
+# consumes the endpoint itself, so the request looks fully legitimate and
+# needs no relay, no token and no login. The response is the exact data.user
+# shape the direct API path parses — EXACT follower counts + the 12 most
+# recent posts with real likes/comments. Zero credentials, zero login.
 # ---------------------------------------------------------------------------
 
-# Public gateways are best-effort (they rate-limit/outage often). Set
-# IG_GATEWAY_URLS to a comma-separated list of YOUR OWN relay URLs — e.g. a
-# personal Cloudflare Worker CORS proxy (free, 100k req/day) — to make this
-# provider reliable in production. "{q}" = URL-encoded target; raw "{}"
-# passes the target unencoded (Cloudflare-worker style).
-_PUBLIC_GATEWAYS = (
-    "https://api.allorigins.win/raw?url={q}",
-    "https://corsproxy.io/?url={q}",
-    "https://api.codetabs.com/v1/proxy?quest={q}",
-    # r.jina.ai removed: it now 403s Instagram targets outright (needs API key),
-    # so it only added latency and became the misleading "last error" shown.
+_PLAYWRIGHT_OK: Optional[bool] = None  # lazily resolved import check
+
+
+def _playwright_available() -> bool:
+    """True when the playwright package is importable (browser binary is
+    resolved at launch time — a missing browser is handled as a fetch
+    failure, not an import failure)."""
+    global _PLAYWRIGHT_OK
+    if _PLAYWRIGHT_OK is None:
+        try:
+            import playwright  # noqa: F401
+            _PLAYWRIGHT_OK = True
+        except Exception:
+            _PLAYWRIGHT_OK = False
+    return _PLAYWRIGHT_OK
+
+
+_PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(
+    max(1, int(os.getenv("IG_PLAYWRIGHT_CONCURRENCY", "2")))
 )
-_GATEWAY_URLS_ENV = os.getenv("IG_GATEWAY_URLS", "").strip()
-_GATEWAY_TEMPLATES = tuple(
-    t.strip() for t in _GATEWAY_URLS_ENV.split(",") if t.strip()
-) or _PUBLIC_GATEWAYS
-_CUSTOM_GATEWAYS_CONFIGURED = bool(_GATEWAY_URLS_ENV)
 
 
-async def _fetch_gw_profile(username: str) -> ProfileData:
-    """Fetch web_profile_info through public render gateways (provider #3).
+# Runs inside the instagram.com page (same-origin fetch with the page's own
+# cookies and browser fingerprint). Returns a JSON string:
+#   {"status": <http status>, "body": "<response text>", "error": "..."}
+_PW_PAGE_JS = """
+(async () => {
+  const APP_ID = '936619743392459';
+  const out = {status: 0, body: ''};
+  try {
+    const r = await fetch('/api/v1/users/web_profile_info/?username=__HANDLE__', {
+      headers: {'x-ig-app-id': APP_ID, 'accept': 'application/json'},
+      credentials: 'include'
+    });
+    out.status = r.status;
+    out.body = (await r.text()).slice(0, 512000);
+  } catch (e) {
+    out.error = String(e).slice(0, 200);
+  }
+  return JSON.stringify(out);
+})()
+""".replace("__HANDLE__", "")  # handle is substituted per request below
 
-    Raises RuntimeError when every gateway fails — the caller then surfaces
-    an honest error (never fake data)."""
+
+async def _fetch_playwright_profile(username: str) -> ProfileData:
+    """Fetch web_profile_info from INSIDE a real Chromium page (provider #3).
+
+    Raises RuntimeError when Chromium/Playwright cannot produce real data —
+    the caller then surfaces an honest error (never fake data)."""
+    if not _playwright_available():
+        raise RuntimeError(
+            "Playwright is not installed (pip install playwright && "
+            "playwright install chromium) — keyless browser fetch unavailable."
+        )
     uname = normalize_username(username)
-    perf = _Perf(f"gateway @{uname}")
-    endpoint = (
-        "https://www.instagram.com/api/v1/users/web_profile_info/"
-        f"?username={quote(uname)}"
-    )
-    headers = {
-        "user-agent": _DIRECT_HEADERS["user-agent"],
-        "accept": "application/json",
-        "x-ig-app-id": "936619743392459",
-        "x-requested-with": "XMLHttpRequest",
-    }
-    last = "no gateways configured"
-    token = os.getenv("IG_GATEWAY_TOKEN", "").strip()
-    # Instagram challenges the relay's egress IPs intermittently ("require_login"
-    # 401s come and go per edge isolate/session), so a single attempt per gateway
-    # wastes a working path. Retry each gateway a few times with jittered
-    # backoff — measured ~25% per-shot success becomes ~70%+ per request.
-    gw_retries = max(1, int(os.getenv("IG_GATEWAY_RETRIES", "4")))
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(25.0), follow_redirects=True,
-        proxy=_ig_httpx_proxy(),
-    ) as client:
-        for tmpl in _GATEWAY_TEMPLATES:
-            host = tmpl.split("/")[2]
-            url = tmpl.format(q=quote(endpoint, safe=""))
-            if token and "?" in url:
-                url += "&token=" + quote(token, safe="")
-            resp = None
-            for attempt in range(gw_retries):
-                try:
-                    resp = await client.get(url, headers=headers)
-                except httpx.HTTPError as e:
-                    last = f"{host}: {str(e)[:60]}"
-                    resp = None
-                    break  # transport error: retrying the same gateway won't help
-                if resp.status_code == 200:
-                    break
-                last = f"{host}: HTTP {resp.status_code}"
-                if resp.status_code in (400, 401, 403) and attempt < gw_retries - 1:
-                    # challenge/rate-limit style failure — back off and re-roll
-                    # the dice on a different edge session
-                    await asyncio.sleep(0.8 * (attempt + 1) + random.uniform(0, 0.6))
-            if resp is None or resp.status_code != 200:
-                continue
-            if resp.status_code != 200:
-                detail = ""
-                try:
-                    body = resp.json()
-                    if (
-                        isinstance(body, dict)
-                        and str(body.get("error", "")).lower() == "unauthorized"
-                    ):
-                        detail = (
-                            "relay unauthorized; set IG_GATEWAY_TOKEN to the Worker "
-                            "RELAY_TOKEN"
-                        )
-                except Exception:
-                    pass
-                if resp.status_code == 401 and _CUSTOM_GATEWAYS_CONFIGURED:
-                    detail = detail or (
-                        "relay rejected the request; verify IG_GATEWAY_TOKEN matches "
-                        "the Worker RELAY_TOKEN"
-                    )
-                last = f"{host}: HTTP {resp.status_code}"
-                if detail:
-                    last += f" ({detail})"
-                continue
+    perf = _Perf(f"playwright @{uname}")
+    last = ""
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as e:
+        raise RuntimeError(f"Playwright import failed: {str(e)[:120]}")
+
+    profile_url = f"https://www.instagram.com/{uname}/"
+    page_js = _PW_PAGE_JS.replace("__HANDLE__", quote(uname))
+
+    def _browser_args() -> list:
+        return [
+            "--disable-blink-features=AutomationControlled",
+            *_CHROME_CONTAINER_FLAGS,
+            *_chrome_proxy_flags(),
+        ]
+
+    async def _open_page(pw):
+        """Launch Chromium and open the profile page. Tries the host browser
+        first, then Playwright's managed Chromium — a crashed/locked host
+        browser (or a raced context) must not kill the provider when the
+        managed build is fine. Raises when both fail."""
+        attempts = []
+        host_exe = _find_chrome()
+        if host_exe:
+            attempts.append({"executable_path": host_exe})
+        attempts.append({})  # Playwright-managed resolution
+        err = ""
+        for opts in attempts:
+            browser = None
             try:
-                payload = resp.json()
+                browser = await pw.chromium.launch(
+                    headless=True, args=_browser_args(), **opts
+                )
+                context = await browser.new_context(
+                    user_agent=_DIRECT_HEADERS["user-agent"],
+                    locale="en-US",
+                    viewport={"width": 1280, "height": 2400},
+                )
+                page = await context.new_page()
+                await page.goto(
+                    profile_url, wait_until="domcontentloaded", timeout=45000
+                )
+                await asyncio.sleep(2.5)  # let anonymous session cookies settle
+                return browser, context, page
+            except Exception as e:
+                err = str(e)[:140]
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+        raise RuntimeError(
+            f"Chromium launch/page-open failed ({err}) — run "
+            "`playwright install chromium` or set IG_CHROME_PATH."
+        )
+
+    async def _render_permalink(context, url: str) -> str:
+        """Render one post permalink page in a tab of the SAME browser and
+        return its DOM ("" on failure). og:description on that page carries
+        the real like/comment counts."""
+        p = await context.new_page()
+        try:
+            await p.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.0)
+            return await p.content()
+        except Exception:
+            return ""
+        finally:
+            try:
+                await p.close()
             except Exception:
-                last = f"{host}: non-JSON body"
-                continue
-            # Unwrap the few gateways that envelope the body (allorigins /get
-            # style: {"contents": "<json string>", ...}).
-            if (
-                isinstance(payload, dict)
-                and isinstance(payload.get("contents"), str)
-                and "data" not in payload
+                pass
+
+    async def _attach_posts(profile: ProfileData, html: str) -> ProfileData:
+        """Fill a stats-only profile with REAL per-post engagement by
+        rendering the permalinks visible in the profile page's own DOM
+        (bounded: IG_PERMALINK_POSTS items, ~6s each in small waves)."""
+        if profile is None or profile.recent_posts or not html:
+            return profile
+        links = _extract_permalinks(html, 20)
+        if not links:
+            return profile
+        max_posts = int(os.getenv("IG_PERMALINK_POSTS", "12"))
+        targets = links[:max_posts]
+        urls = [
+            f"https://www.instagram.com/{'reel' if kind == 'reel' else 'p'}/{code}/"
+            for code, kind in targets
+        ]
+        sem = asyncio.Semaphore(4)  # small waves — gentle on the IP
+
+        async def _one(i: int, u: str) -> Optional[Post]:
+            if i:
+                await asyncio.sleep(min(0.15 * i, 1.2))
+            async with sem:
+                dom = await _render_permalink(context, u)
+            if not dom:
+                return None
+            code, kind = targets[i]
+            return _parse_post_permalink_dom(dom, code, kind)
+
+        rendered = await asyncio.gather(*(_one(i, u) for i, u in enumerate(urls)))
+        posts = [p for p in rendered if p is not None]
+        if posts:
+            profile.recent_posts = posts
+        return profile
+
+    async def _attempt(context, page) -> Tuple[Optional[ProfileData], str]:
+        """One full pass: in-page API query → embedded-JSON harvest →
+        permalink enrichment for stats-only results. Returns (profile|None,
+        last-error)."""
+        raw = await page.evaluate(page_js)
+        perf.stage("in-page web_profile_info done")
+        try:
+            result = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            result = {}
+        profile: Optional[ProfileData] = None
+        last_err = ""
+        if result.get("status") == 200 and result.get("body"):
+            try:
+                payload = json.loads(result["body"])
+                user = ((payload or {}).get("data") or {}).get("user")
+            except Exception:
+                user = None
+            if isinstance(user, dict):
+                profile = _map_direct_user(user, uname)
+                if profile.followers == 0 and not profile.recent_posts:
+                    last_err = "in-page 200 but empty user object"
+                    profile = None
+            else:
+                last_err = f"in-page HTTP {result.get('status')} (no user)"
+        else:
+            last_err = (
+                f"in-page fetch failed: HTTP {result.get('status')} "
+                f"{str(result.get('error') or '')[:80]}"
+            )
+
+        html = ""
+        try:
+            html = await page.content()
+        except Exception:
+            pass
+
+        # Embedded GraphQL Relay blobs — Instagram ships profile data to its
+        # own frontend even when the API query is refused.
+        if profile is None and html:
+            embedded = _extract_profile_from_html(html, uname)
+            if embedded is not None and (
+                embedded.followers > 0 or embedded.recent_posts
             ):
+                profile = embedded
+                last_err = ""
+
+        if profile is not None and not profile.recent_posts and html:
+            # Stats-only (media grid is lazy-loaded): render the visible
+            # permalinks for real likes/comments.
+            profile = await _attach_posts(profile, html)
+            perf.stage(f"posts attached: {len(profile.recent_posts)}")
+        if profile is None:
+            # Instagram renders "Profile isn't available" for nonexistent/
+            # removed handles — an honest ValueError (HTTP 400), not 503.
+            try:
+                title = str(await page.title() or "").lower()
+            except Exception:
+                title = ""
+            if (
+                "isn't available" in title
+                or "not found" in title
+                or "sorry, this page" in title
+            ):
+                raise ValueError(
+                    f"Instagram profile '@{uname}' not found. "
+                    "Check the spelling of the handle."
+                )
+        return profile, last_err
+
+    try:
+        async with _PLAYWRIGHT_SEMAPHORE:  # bound concurrent browser launches
+            async with async_playwright() as pw:
+                browser, context, page = await _open_page(pw)
+                perf.stage("browser + page open")
                 try:
-                    payload = json.loads(payload["contents"])
-                except Exception:
-                    pass
-            user = ((payload or {}).get("data") or {}).get("user")
-            if not isinstance(user, dict):
-                last = f"{host}: no data.user in body"
-                continue
-            profile = _map_direct_user(user, uname)
-            if profile.followers == 0 and not profile.recent_posts:
-                last = f"{host}: empty user object"
-                continue
-            perf.stage(f"OK via {host}")
-            return await _backfill_missing_likes(profile)
-    if _CUSTOM_GATEWAYS_CONFIGURED:
-        hint = (
-            "Verify IG_GATEWAY_TOKEN on Render exactly matches RELAY_TOKEN in the "
-            "Cloudflare Worker. IG_PROXY_URL only affects direct Instagram "
-            "HTTP/Chrome requests and does not fix relay authentication."
-        )
-    else:
-        hint = (
-            "Configure IG_PROXY_URL for the direct Instagram HTTP/Chrome path, "
-            "or configure a protected IG_GATEWAY_URLS/IG_GATEWAY_TOKEN relay."
-        )
+                    profile, last = await _attempt(context, page)
+                    if profile is None:
+                        # Challenges (401 "require_login") are intermittent
+                        # per session — one fresh navigation often clears it.
+                        try:
+                            await page.goto(
+                                profile_url,
+                                wait_until="domcontentloaded",
+                                timeout=45000,
+                            )
+                            await asyncio.sleep(2.5)
+                            profile, last = await _attempt(context, page)
+                            perf.stage("retry pass done")
+                        except Exception as e:
+                            last = last or str(e)[:120]
+                    if profile is not None:
+                        perf.stage("OK")
+                        return await _backfill_missing_likes(profile)
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+    except RuntimeError:
+        raise
+    except ValueError:
+        raise  # honest handle-not-found — must reach the API layer as-is
+    except Exception as e:
+        # Provider contract: callers only catch RuntimeError/httpx.HTTPError.
+        # A raw Playwright error escaping here would crash get_profile's
+        # provider ladder instead of moving on.
+        raise RuntimeError(f"Playwright fetch error: {str(e)[:140]}")
     raise RuntimeError(
-        f"All render gateways failed for @{uname} ({last}) — Instagram data "
-        f"unreachable from this host. {hint}"
+        f"Playwright Chromium fetch failed for @{uname} ({last}) — Instagram "
+        "blocked the in-page query and the page carried no usable data."
     )
 
 
@@ -3075,8 +3250,6 @@ async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict
          accounts data still get competitors.
     """
     username = normalize_username(username)
-    if DATA_MODE == "demo":
-        return _demo_related(username, limit)
 
     # Disk cache: discovered competitor lists drift slowly — serve instantly
     # for a day instead of re-running discovery actor calls.
@@ -3095,9 +3268,9 @@ async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict
         await asyncio.to_thread(_cache_set, cache_key, local)
         return local
 
-    # Live mode without a token: same contract as cache mode — nothing
-    # beyond the local cache is possible, but never raise.
-    if DATA_MODE != "live" or not APIFY_TOKENS:
+    # No discovery actor token: only cache-mined candidates are possible,
+    # but discovery itself never raises — return what we have.
+    if not APIFY_TOKENS:
         return []
 
     profile_item: Optional[Dict[str, Any]] = None
@@ -3117,8 +3290,6 @@ async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict
                 _stash_related(username, items)
                 rp = items[0].get("relatedProfiles")
         except (RuntimeError, httpx.HTTPError):
-            if FALLBACK_TO_DEMO:
-                return _demo_related(username, limit)
             raise
         rp = rp if isinstance(rp, list) else []
 
@@ -3137,8 +3308,6 @@ async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict
         try:
             search_rows = await _run_search_actor(queries, limit=limit)
         except (RuntimeError, httpx.HTTPError):
-            if FALLBACK_TO_DEMO:
-                return candidates  # return whatever related accounts we already have
             raise
         fresh = [
             row for row in search_rows
@@ -3153,109 +3322,6 @@ async def discover_related_profiles(username: str, limit: int = 30) -> List[Dict
 
 
 # ---------------------------------------------------------------------------
-# Demo generator (offline dev / FALLBACK_TO_DEMO)
-# ---------------------------------------------------------------------------
-
-CATEGORIES = ["Fashion", "Fitness", "Food & Beverage", "Tech", "Beauty",
-              "Travel", "Finance", "Education", "Gaming", "Home & Decor"]
-
-HASHTAG_POOL = {
-    "Fashion": ["#ootd", "#style", "#fashionista", "#trending", "#newdrop"],
-    "Fitness": ["#fitfam", "#gains", "#workout", "#healthylifestyle", "#gymlife"],
-    "Food & Beverage": ["#foodie", "#recipe", "#yum", "#eatlocal", "#foodstagram"],
-    "Tech": ["#tech", "#innovation", "#startup", "#ai", "#gadgets"],
-    "Beauty": ["#skincare", "#makeup", "#glowup", "#beautytips", "#selfcare"],
-    "Travel": ["#wanderlust", "#travelgram", "#explore", "#vacay", "#adventure"],
-    "Finance": ["#investing", "#moneytips", "#personalfinance", "#wealth", "#fintech"],
-    "Education": ["#learning", "#edtech", "#study", "#knowledge", "#growth"],
-    "Gaming": ["#gaming", "#gamer", "#esports", "#gameplay", "#twitch"],
-    "Home & Decor": ["#interiordesign", "#homedecor", "#diy", "#cozyhome", "#renovation"],
-}
-
-MEDIA_TYPES = ["image", "carousel", "reel", "reel", "video"]  # reels weighted higher
-
-
-def _seed_from_username(username: str) -> random.Random:
-    """Deterministic per-username RNG so the same handle always returns the
-    same demo numbers (reproducible for offline development)."""
-    h = hashlib.sha256(username.lower().encode()).hexdigest()
-    return random.Random(int(h[:12], 16))
-
-
-def generate_demo_profile(username: str) -> ProfileData:
-    rnd = _seed_from_username(username)
-    category = rnd.choice(CATEGORIES)
-
-    followers = rnd.randint(2_000, 850_000)
-    following = rnd.randint(150, 3_000)
-    posts_count = rnd.randint(40, 1200)
-    is_business = rnd.random() > 0.35
-    is_verified = followers > 500_000 and rnd.random() > 0.5
-
-    bio_templates = [
-        f"{category} content creator | Turning ideas into visuals ✨",
-        f"{category} brand | DM for collabs 📩",
-        f"Sharing my {category.lower()} journey 🌱 | Est. {rnd.randint(2016, 2024)}",
-        f"{category} | Helping you level up, one post at a time",
-    ]
-    bio = rnd.choice(bio_templates)
-
-    # Engagement tends to shrink as % once follower count grows (realistic)
-    base_engagement = max(0.008, 0.09 - (followers / 10_000_000))
-    posts: List[Post] = []
-    tags = HASHTAG_POOL[category]
-    for i in range(12):
-        er = max(0.002, rnd.gauss(base_engagement, base_engagement * 0.4))
-        likes = int(followers * er)
-        comments = int(likes * rnd.uniform(0.01, 0.06))
-        posts.append(Post(
-            id=f"{username}_{i}",
-            caption=f"Post about {category.lower()} #{i + 1}",
-            likes=max(1, likes),
-            comments=max(0, comments),
-            posted_days_ago=i * rnd.randint(2, 6),
-            hashtags=rnd.sample(tags, k=min(3, len(tags))),
-            media_type=rnd.choice(MEDIA_TYPES),
-        ))
-
-    return ProfileData(
-        username=username,
-        full_name=username.replace("_", " ").replace(".", " ").title(),
-        bio=bio,
-        followers=followers,
-        following=following,
-        posts_count=posts_count,
-        is_verified=is_verified,
-        is_business=is_business,
-        category=category,
-        recent_posts=posts,
-    )
-
-
-def _demo_related(username: str, limit: int) -> List[Dict[str, Any]]:
-    """Deterministic pseudo-competitors for demo mode / offline dev."""
-    rnd = _seed_from_username(username + "::related")
-    stems = [username.replace(".", ""), username.split(".")[0], username.replace("_", "")]
-    suffixes = ["hq", "daily", "official", "hub", "world", "central", "lab", "co", "media", "plus"]
-    out: List[Dict[str, Any]] = []
-    seen = set()
-    for i in range(limit):
-        name = f"{rnd.choice(stems)}_{rnd.choice(suffixes)}{rnd.randint(2, 99) if rnd.random() > 0.6 else ''}"
-        if name in seen:
-            continue
-        seen.add(name)
-        out.append({
-            "username": name,
-            "full_name": name.replace("_", " ").title(),
-            "bio": "",
-            "followers": rnd.randint(1_000, 500_000),
-            "verified": False,
-            "private": False,
-        })
-    return out
-
-
-# ---------------------------------------------------------------------------
 # Public entrypoints
 # ---------------------------------------------------------------------------
 
@@ -3266,11 +3332,6 @@ def _cached(username: str) -> Optional[ProfileData]:
     if entry:
         _profile_cache.pop(username, None)
     return None
-
-
-def is_demo_row(profile: ProfileData) -> bool:
-    """True when a profile row is simulated (data_age_hours == -1)."""
-    return profile.data_age_hours == -1
 
 
 def _cached_profile_pool_sync(exclude: set, limit: int) -> List[Dict[str, Any]]:
@@ -3344,11 +3405,6 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
             else:
                 missing.append(u)
 
-    if DATA_MODE == "demo":
-        for u in missing:
-            result[u] = generate_demo_profile(u)
-        return result
-
     if not missing:
         return result
 
@@ -3371,7 +3427,7 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     # Per-handle failures (incl. non-professional accounts) are skipped and
     # surface as the batch's usual missing-key warnings; token failures fall
     # through to the existing providers.
-    if DATA_MODE == "live" and _has_graph_credentials():
+    if _has_graph_credentials():
         for i, u in enumerate(still_missing):
             if i:
                 await asyncio.sleep(0.5)  # pace app-level rate limits
@@ -3387,24 +3443,6 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
         still_missing = [u for u in still_missing if u not in result]
         if not still_missing:
             return result
-
-    # Non-live modes: unknown handles fall back to stale REAL data, then
-    # deterministic simulated data (badged via data_age_hours = -1) so
-    # pipelines never hard-fail.
-    if DATA_MODE != "live":
-        for u in still_missing:
-            stale = await asyncio.to_thread(_disk_profile_get_any, u)
-            if stale is not None:
-                result[u] = stale
-                async with _CACHE_LOCK:
-                    _profile_cache[u] = (time.monotonic(), stale)
-            else:
-                demo = generate_demo_profile(u)
-                demo.data_age_hours = -1
-                result[u] = demo
-                async with _CACHE_LOCK:
-                    _profile_cache[u] = (time.monotonic(), demo)
-        return result
 
     # LIVE: one batched actor run for every uncached handle (cheapest path).
     failed = list(still_missing)
@@ -3446,6 +3484,9 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
 
     # Provider #2 — keyless direct fetch for whatever the pool couldn't serve
     # (no tokens configured, pool exhausted, or handles missing from the run).
+    # A ValueError (handle does not exist) SKIPS the handle in batch context —
+    # the caller surfaces it as a warning — while single get_profile raises
+    # the honest 400. One dead rival handle must not kill a research batch.
     if failed and DIRECT_FETCH_ENABLED:
         for i, u in enumerate(failed):
             if i:
@@ -3453,32 +3494,25 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
             try:
                 profile = await _fetch_direct_profile(u)
             except (ValueError, RuntimeError, httpx.HTTPError):
-                # Blocked-IP hosts: last resort before giving up on the handle.
-                try:
-                    profile = await _fetch_gw_profile(u)
-                except (RuntimeError, httpx.HTTPError):
-                    continue  # caller surfaces missing handles as warnings
+                continue  # caller surfaces missing handles as warnings
             await asyncio.to_thread(_disk_profile_set, u, profile)
             async with _CACHE_LOCK:
                 _profile_cache[u] = (time.monotonic(), profile)
             result[u] = profile
 
-    if failed and FALLBACK_TO_DEMO:
-        for u in failed:
-            if u not in result:
-                result[u] = generate_demo_profile(u)
-
     return result
 
 
 async def get_profile(username: str) -> ProfileData:
-    """Profile fetch with latency layers:
+    """Profile fetch with latency layers (REAL DATA ONLY):
 
       1. in-memory TTL cache (instant, per-process)
       2. persistent SQLite disk cache (instant, survives restarts)
-      3. live Apify actor run (10-60s) — only in live mode with a token
-      4. deterministic demo generator (cache/demo modes, badged simulated;
-         live mode only when FALLBACK_TO_DEMO=true)
+      3. live providers: Graph API → Apify actor → keyless direct
+         (Playwright Chromium) → keyless HTTP ladder
+
+    Every failure surfaces honestly (ValueError = handle does not exist,
+    RuntimeError = all providers blocked). Simulated data is never served.
     """
     username = normalize_username(username)
 
@@ -3486,13 +3520,6 @@ async def get_profile(username: str) -> ProfileData:
         cached = _cached(username)
     if cached is not None:
         return cached
-
-    if DATA_MODE == "demo":
-        demo = generate_demo_profile(username)
-        demo.data_age_hours = -1
-        async with _CACHE_LOCK:
-            _profile_cache[username] = (time.monotonic(), demo)
-        return demo
 
     # Layer 2: disk (offloaded to a thread; SQLite is sync).
     disk = await asyncio.to_thread(_disk_profile_get, username)
@@ -3502,8 +3529,7 @@ async def get_profile(username: str) -> ProfileData:
         # handle, so real engagement fills in as soon as a provider can
         # serve it — without slowing down ordinary cache hits.
         if (
-            DATA_MODE == "live"
-            and not disk.recent_posts
+            not disk.recent_posts
             and (APIFY_TOKENS or DIRECT_FETCH_ENABLED)
             and username not in _selfheal_attempted
         ):
@@ -3532,7 +3558,7 @@ async def get_profile(username: str) -> ProfileData:
     # TTL serves INSTANTLY (real data, age-badged) while a background task
     # refreshes it from a live provider. The user stops waiting on cold
     # fetches for handles seen recently; the cache self-heals.
-    if DATA_MODE == "live" and (APIFY_TOKENS or DIRECT_FETCH_ENABLED or _has_graph_credentials()):
+    if APIFY_TOKENS or DIRECT_FETCH_ENABLED or _has_graph_credentials():
         stale = await asyncio.to_thread(_disk_profile_get_any, username)
         _swr_window_h = (_DISK_TTL_PROFILE / 3600) + 48
         if stale is not None and (stale.data_age_hours or 0) <= _swr_window_h:
@@ -3577,7 +3603,7 @@ async def get_profile(username: str) -> ProfileData:
     # a professional account) raises ValueError immediately with a clear
     # message; a TOKEN/app failure only logs and falls through to the next
     # provider so one expired key never takes the app down.
-    if DATA_MODE == "live" and _has_graph_credentials():
+    if _has_graph_credentials():
         try:
             profile = await fetch_live_profile(username)
         except ValueError:
@@ -3590,8 +3616,7 @@ async def get_profile(username: str) -> ProfileData:
                 _profile_cache[username] = (time.monotonic(), profile)
             return profile
 
-    live_capable = DATA_MODE == "live" and bool(APIFY_TOKENS)
-    if live_capable:
+    if bool(APIFY_TOKENS):
         # Layer 3: live fetch via the Apify pool. On ANY provider-level
         # failure (tokens exhausted/benched, actor timeout, network error)
         # fall through to provider #2 — the keyless direct endpoint — before
@@ -3611,7 +3636,7 @@ async def get_profile(username: str) -> ProfileData:
     # pool run just failed (e.g. monthly credit exhausted). Needs zero
     # credentials for public profiles, so unknown handles no longer get fake
     # numbers just because Apify credits ran out.
-    if DATA_MODE == "live" and DIRECT_FETCH_ENABLED:
+    if DIRECT_FETCH_ENABLED:
         try:
             profile = await _fetch_direct_profile(username)
         except ValueError:
@@ -3627,23 +3652,17 @@ async def get_profile(username: str) -> ProfileData:
                 async with _CACHE_LOCK:
                     _profile_cache[username] = (time.monotonic(), gql_profile)
                 return gql_profile
-            # Datacenter IP hard-blocked (Render free tier): route the same
-            # Instagram JSON through render gateways (your own relay via
-            # IG_GATEWAY_URLS, or the built-in public ones) — real data, no
-            # tokens, no login. This runs BEFORE the simulated fallback so a
-            # tokenless blocked-IP deployment keeps serving real data instead
-            # of silently degrading to badged demo rows.
+            # Datacenter IP hard-blocked (Render free tier): fetch the same
+            # Instagram JSON from inside a real Chromium page (Playwright
+            # provider) — real data, no tokens, no login, no relay.
             try:
-                gw_profile = await _fetch_gw_profile(username)
+                gw_profile = await _fetch_playwright_profile(username)
             except (RuntimeError, httpx.HTTPError) as gw_err:
-                if FALLBACK_TO_DEMO:
-                    print(
-                        f"[fetch] @{username}: gateways also failed "
-                        f"({str(gw_err)[:120]}) — serving badged simulated data"
-                    )
-                    pass  # fall through to stale/demo handling below
-                else:
-                    raise  # honest failure — never fake data by default
+                print(
+                    f"[fetch] @{username}: every real-data provider failed "
+                    f"({str(gw_err)[:120]}) — raising an honest error"
+                )
+                raise
             else:
                 await asyncio.to_thread(_disk_profile_set, username, gw_profile)
                 async with _CACHE_LOCK:
@@ -3655,16 +3674,7 @@ async def get_profile(username: str) -> ProfileData:
                 _profile_cache[username] = (time.monotonic(), profile)
             return profile
 
-    # Live fetch failed (with FALLBACK_TO_DEMO) or non-live mode: last resort
-    # is stale REAL data, then a badged simulated row.
-    stale = await asyncio.to_thread(_disk_profile_get_any, username)
-    if stale is not None:
-        async with _CACHE_LOCK:
-            _profile_cache[username] = (time.monotonic(), stale)
-        return stale
-
-    demo = generate_demo_profile(username)
-    demo.data_age_hours = -1
-    async with _CACHE_LOCK:
-        _profile_cache[username] = (time.monotonic(), demo)
-    return demo
+    raise RuntimeError(
+        "All real-data providers are disabled (DIRECT_FETCH_ENABLED=false and "
+        "no Apify/Graph tokens) — refusing to serve simulated data."
+    )

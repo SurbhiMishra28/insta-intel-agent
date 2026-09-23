@@ -29,12 +29,15 @@ find is either (a) working around this against Instagram's Terms of
 Service, or (b) reselling access from a licensed data partner. This project
 is built honestly around that constraint:
 
-- **`DATA_MODE=live`** (default): real public profile data — followers,
-  bio, verification, and the 12 most recent posts with real likes,
-  comments, timestamps and media types — fetched via Apify's Instagram
-  Scraper actor (`apify/instagram-scraper`). Paste any handle or a full
-  instagram.com profile URL. Requires a free `APIFY_TOKEN` in
-  `backend/.env`.
+- **Real data only, by design.** Every number comes from a real source:
+  the official Instagram Graph API (when configured), Apify's Instagram
+  Scraper actor (when `APIFY_TOKEN` is set), or — with zero credentials —
+  the keyless **Playwright Chromium headless** provider: a real browser
+  opens instagram.com and reads Instagram's own `web_profile_info` JSON
+  from inside the page. Followers, bio, verification, and the 12 most
+  recent posts with real likes, comments, timestamps and media types.
+  Failures are honest errors (400 = handle does not exist, 503 = every
+  provider blocked); simulated/demo data does not exist in this system.
 
 **Competitor auto-discovery (works for every account):** the agent reads
 Instagram's own related-accounts signal for the handle (30 candidates).
@@ -46,26 +49,20 @@ most relevant are selected (LangChain chain when an LLM key is set;
 deterministic scoring otherwise), then fetched and analyzed with real
 data. Discovery usually costs no extra actor run — related profiles are
 captured during the main profile fetch.
-- **`DATA_MODE=demo`**: deterministic seeded fake data (same handle always
-  returns the same numbers) so you can develop the UI with zero external
-  dependency. Optionally serve it automatically when the live fetch fails
-  by setting `FALLBACK_TO_DEMO=true`.
-
-The AI layer, the metrics engine, the comparison logic, and the whole UI
-are fully real and functional either way — only the data source is
-swapped.
+The metrics engine, the comparison logic, and the whole UI are fully
+functional on real data at all times.
 
 **What the "AI" part is:** `backend/ai_engine.py` computes real statistics
 (engagement rate, posting frequency, top hashtags, best-performing content
 type) and then generates natural-language analysis two ways:
-- If you set `LLM_API_KEY` (any OpenAI-compatible endpoint via
-  `LLM_BASE_URL` / `LLM_MODEL`), LangChain chains write the per-profile
-  reports, pick the most relevant competitors from the candidate pool, and
-  produce the market research (competitive gaps, content gaps,
-  opportunities) as structured JSON.
+- The default provider is **OpenRouter** (`LLM_BASE_URL=https://openrouter.ai/api/v1`,
+  default model `google/gemma-4-31b-it:free` with free-tier failovers).
+  Any OpenAI-compatible endpoint works via `LLM_BASE_URL` / `LLM_MODEL`
+  (including NVIDIA NIM with an `nvapi-...` key). LangChain chains write
+  the per-profile reports, pick the most relevant competitors from the
+  candidate pool, and produce the market research as structured JSON.
 - If no key is set, a rule-based engine produces the same shape of output
-  from the same metrics — so the app is fully demoable with no API key at
-  all.
+  from the same metrics.
 
 ## 2. Project structure
 
@@ -74,8 +71,8 @@ insta-intel-agent/
 ├── backend/
 │   ├── main.py          FastAPI app: /api/analyze, /api/discover,
 │   │                    /api/competitor-research, /api/compare
-│   ├── scraper.py        Data layer (Apify live fetch, competitor
-│   │                     discovery via related accounts, demo generator)
+│   ├── scraper.py        Data layer (Graph API / Apify / keyless Playwright
+│   │                     Chromium, competitor discovery via related accounts)
 │   ├── ai_engine.py       LangChain chains: insights, competitor
 │   │                     selection, market research (+ rule fallbacks)
 │   ├── models.py          Pydantic schemas
@@ -155,41 +152,17 @@ identically without it.
 2. On Render: New → Web Service → connect the repo, set root directory to `backend`.
 3. Build command: `pip install -r requirements.txt`
 4. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Add env vars `DATA_MODE=live` and `APIFY_TOKEN` (mark it as a secret).
+5. Add env vars `LLM_API_KEY` (optional) and `APIFY_TOKEN` (optional — mark as secret).
 6. Deploy. You'll get a URL like `https://your-app.onrender.com`.
 
-**Recommended for Render: the Cloudflare Worker IG relay (free, ~5 min).**
-Instagram hard-blocks Render's datacenter IP, so the backend needs a relay
-that fetches from Cloudflare's edge instead. The worker lives in
-`cloudflare-worker/ig-relay.js`:
-
-```bash
-cd cloudflare-worker
-npx wrangler login        # once
-npx wrangler deploy       # prints https://ig-relay.<your-subdomain>.workers.dev
-npx wrangler secret put RELAY_TOKEN   # paste a random secret (e.g. `python -c "import secrets;print(secrets.token_hex(24))"`)
-```
-
-Then on the Render service add (mirroring the same secret):
-
-- `IG_GATEWAY_URLS = https://ig-relay.<your-subdomain>.workers.dev/?url={q}`
-- `IG_GATEWAY_TOKEN = <the RELAY_TOKEN value>`
-
-For the direct Instagram HTTP/Chrome fallback, also add a residential or
-mobile proxy in Render only:
-
-- `IG_PROXY_URL = http://user:pass@proxy-host:port`
-
-`IG_PROXY_URL` does not authenticate the Cloudflare relay; a protected relay
-still requires the matching `IG_GATEWAY_TOKEN`. Do not put either value in
-Vercel. The frontend needs only:
-
-- `VITE_API_URL = https://<your-render-service>.onrender.com`
-
-The backend automatically appends `&token=...` to every gateway call and
-falls back to public gateways/Apify when the relay is challenged. The worker
-is locked to Instagram's `web_profile_info` endpoint only (not an open
-proxy) and the free tier allows 100k requests/day.
+**Recommended for Render: no relay needed — real data via headless Chromium.**
+The backend ships a keyless Playwright Chromium provider: a real headless
+browser opens instagram.com and reads Instagram's own `web_profile_info`
+JSON from inside the page (same session, cookies and fingerprint as the
+site's own frontend), so no relay, token or third-party gateway is
+involved. The Docker image already includes Chromium; on a bare VPS install
+it once with `playwright install chromium` (or `apt install chromium` and
+set `IG_CHROME_PATH=/usr/bin/chromium`).
 
 **Frontend → Vercel or Netlify (free tier):**
 1. New project → import the repo, set root directory to `frontend`.
@@ -211,10 +184,10 @@ description), this is the real build process, in order:
 
 1. **Scope the problem honestly.** Realized "scrape any Instagram
    competitor" isn't something the official API allows, so designed the
-   data layer as a swappable interface from day one (`get_profile()` →
-   demo generator or live provider behind `DATA_MODE`). This is a
-   legitimate, common pattern in production systems that depend on
-   third-party data (feature-flag your data source).
+   data layer as a provider ladder from day one (`get_profile()` tries
+   Graph API → Apify → keyless Playwright Chromium before failing with an
+   honest error). This is a legitimate, common pattern in production
+   systems that depend on third-party data.
 
 2. **Design the schema first.** Wrote `models.py` (Pydantic) defining
    `ProfileData`, `Post`, `ProfileMetrics`, `ProfileInsight` — this is the

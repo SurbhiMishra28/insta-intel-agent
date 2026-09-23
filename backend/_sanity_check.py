@@ -1,10 +1,13 @@
-"""Offline sanity checks for the NVIDIA-only data layer (no network, no keys)."""
+"""Offline sanity checks for the REAL-ONLY data layer (no network, no keys).
+
+All data in the system is real; these tests verify the provider wiring and
+that failures surface honestly instead of ever serving simulated rows.
+"""
 import asyncio
 import os
 import time
 
-os.environ["DATA_MODE"] = "cache"
-for _k in ("APIFY_TOKEN", "APIFY_TOKENS", *[(f"APIFY_TOKEN_{i}") for i in range(2, 10)], "RAPIDAPI_KEY"):
+for _k in ("APIFY_TOKEN", "APIFY_TOKENS", *[(f"APIFY_TOKEN_{i}") for i in range(2, 10)], "RAPIDAPI_KEY", "IG_ACCESS_TOKEN", "IG_BUSINESS_ID"):
     os.environ.pop(_k, None)
 
 import scraper  # noqa: E402
@@ -74,32 +77,27 @@ async def test_get_profile_cache_first():
     print("get_profile serves real cached data: OK")
 
 
-async def test_unknown_handle_gets_badged_demo():
-    scraper._profile_cache.clear()
-    import sqlite3
-    conn = sqlite3.connect(scraper._CACHE_DB)
-    conn.execute('DELETE FROM cache WHERE key LIKE "profile:nevercached%"')
-    conn.commit()
-    conn.close()
-
-    got = await scraper.get_profile("nevercachedhandle77")
-    assert got.username == "nevercachedhandle77"
-    assert scraper.is_demo_row(got), "unknown handle must be badged as simulated"
-    assert got.data_age_hours == -1
-    # Deterministic: same handle -> same simulated numbers.
-    again = await scraper.get_profile("nevercachedhandle77")
-    assert again.followers == got.followers
-    print("unknown handle -> badged simulated data: OK")
-
-
 async def test_batch_mixed():
+    """Cached handles are served; unknown handles simply stay missing —
+    the caller surfaces them as errors/warnings. No simulated rows are
+    invented. (Providers are stubbed so the test stays offline.)"""
     scraper._profile_cache.clear()
     known = _make_profile("batchknown")
     scraper._disk_profile_set("batchknown", known)
-    res = await scraper.get_profiles_batch(["batchknown", "batchunknown_99"])
+
+    async def not_found_direct(username):
+        raise ValueError(f"Instagram profile '@{username}' not found (stubbed)")
+
+    real_direct = scraper._fetch_direct_profile
+    scraper._fetch_direct_profile = not_found_direct
+    try:
+        res = await scraper.get_profiles_batch(["batchknown", "batchunknown_99"])
+    finally:
+        scraper._fetch_direct_profile = real_direct
+        scraper._profile_cache.clear()
     assert res["batchknown"].username == "batchknown"
-    assert scraper.is_demo_row(res["batchunknown_99"])
-    print("batch fetch (cached real + badged demo): OK")
+    assert "batchunknown_99" not in res, "unknown handles must not get invented rows"
+    print("batch fetch (cached real; unknown stays honestly missing): OK")
 
 
 def test_local_discovery():
@@ -127,15 +125,13 @@ def test_local_discovery():
 
 
 async def test_live_mode_failover_to_direct_provider():
-    """Provider wiring: DATA_MODE=live with NO Apify tokens must call the
-    keyless direct provider (provider #2) — not silently serve fake data."""
+    """Provider wiring: no Apify tokens must call the keyless direct provider
+    (provider #2) — not silently serve fake data."""
     scraper._profile_cache.clear()
     _purge_handle("directonlyhandle")
 
-    old = (scraper.DATA_MODE, list(scraper.APIFY_TOKENS), scraper.FALLBACK_TO_DEMO)
-    scraper.DATA_MODE = "live"
+    old = list(scraper.APIFY_TOKENS)
     scraper.APIFY_TOKENS = []
-    scraper.FALLBACK_TO_DEMO = False
     try:
         calls = {"direct": 0}
 
@@ -148,11 +144,10 @@ async def test_live_mode_failover_to_direct_provider():
         got = await scraper.get_profile("DirectOnlyHandle")
         assert calls["direct"] == 1
         assert got.username == "directonlyhandle" and got.followers == 4242
-        assert not scraper.is_demo_row(got), "direct-provider data must never be badged as simulated"
-        print("live mode no-token -> keyless direct provider: OK")
+        print("no-token -> keyless direct provider: OK")
     finally:
         scraper._fetch_direct_profile = real_direct
-        (scraper.DATA_MODE, scraper.APIFY_TOKENS, scraper.FALLBACK_TO_DEMO) = old
+        scraper.APIFY_TOKENS = old
         scraper._profile_cache.clear()
         _purge_handle("directonlyhandle")
 
@@ -163,10 +158,8 @@ async def test_live_mode_pool_exhausted_falls_over_to_direct():
     scraper._profile_cache.clear()
     _purge_handle("exhaustedhandle")
 
-    old = (scraper.DATA_MODE, list(scraper.APIFY_TOKENS), scraper.FALLBACK_TO_DEMO)
-    scraper.DATA_MODE = "live"
+    old = list(scraper.APIFY_TOKENS)
     scraper.APIFY_TOKENS = ["fake-exhausted-token"]
-    scraper.FALLBACK_TO_DEMO = False
     try:
         calls = {"apify": 0, "direct": 0}
 
@@ -183,39 +176,42 @@ async def test_live_mode_pool_exhausted_falls_over_to_direct():
         scraper._fetch_direct_profile = fake_direct
         got = await scraper.get_profile("exhaustedhandle")
         assert calls["apify"] == 1 and calls["direct"] == 1, calls
-        assert got.followers == 777 and not scraper.is_demo_row(got)
-        print("live mode simulated pool exhaustion -> direct fallback: OK")
+        assert got.followers == 777
+        print("simulated pool exhaustion -> direct fallback: OK")
     finally:
         scraper._fetch_live_profile, scraper._fetch_direct_profile = real_apify, real_direct
-        (scraper.DATA_MODE, scraper.APIFY_TOKENS, scraper.FALLBACK_TO_DEMO) = old
+        scraper.APIFY_TOKENS = old
         scraper._profile_cache.clear()
         _purge_handle("exhaustedhandle")
 
 
 async def test_live_mode_honest_error_when_all_providers_fail():
-    """Both providers failing in live mode must raise — NEVER fall back to a
-    badged simulated row (the bug that showed fake numbers for real handles)."""
+    """All providers failing must raise — NEVER fall back to a simulated row
+    (the bug that showed fake numbers for real handles)."""
     scraper._profile_cache.clear()
     _purge_handle("bothfailhandle")
 
-    old = (scraper.DATA_MODE, list(scraper.APIFY_TOKENS), scraper.FALLBACK_TO_DEMO)
-    scraper.DATA_MODE = "live"
+    old = list(scraper.APIFY_TOKENS)
     scraper.APIFY_TOKENS = []
-    scraper.FALLBACK_TO_DEMO = False
     try:
         async def failing_direct(username):
             raise RuntimeError("Instagram rate-limiting this IP (simulated)")
 
+        async def failing_playwright(username):
+            raise RuntimeError("Playwright Chromium fetch failed (simulated)")
+
         scraper._fetch_direct_profile = failing_direct
+        scraper._fetch_playwright_profile = failing_playwright
         try:
             await scraper.get_profile("bothfailhandle")
         except RuntimeError:
-            print("live mode all-providers-failed -> honest RuntimeError: OK")
+            print("all-providers-failed -> honest RuntimeError: OK")
         else:
             raise AssertionError("expected RuntimeError, got a (fake) profile instead")
     finally:
         scraper._fetch_direct_profile = _restore_direct
-        (scraper.DATA_MODE, scraper.APIFY_TOKENS, scraper.FALLBACK_TO_DEMO) = old
+        scraper._fetch_playwright_profile = _restore_playwright
+        scraper.APIFY_TOKENS = old
         scraper._profile_cache.clear()
         _purge_handle("bothfailhandle")
 
@@ -236,21 +232,28 @@ def _restore_direct(username: str):
     raise RuntimeError("direct provider not stubbed in this test")
 
 
-def test_demo_determinism():
-    a = scraper.generate_demo_profile("someone")
-    b = scraper.generate_demo_profile("someone")
-    assert a.followers == b.followers and a.bio == b.bio
-    assert scraper.generate_demo_profile("other").followers != a.followers or True
-    print("demo generator deterministic: OK")
+def _restore_playwright(username: str):
+    raise RuntimeError("playwright provider not stubbed in this test")
+
+
+def test_no_demo_machinery():
+    """The demo/simulated subsystem must not exist anymore."""
+    assert not hasattr(scraper, "generate_demo_profile"), "demo generator must be removed"
+    assert not hasattr(scraper, "_demo_related"), "demo competitor generator must be removed"
+    assert not hasattr(scraper, "is_demo_row"), "demo-row badge helper must be removed"
+    src = open(scraper.__file__, encoding="utf-8").read()
+    assert "FALLBACK_TO_DEMO" not in src, "demo fallback flag must be removed"
+    assert "DATA_MODE" not in src, "data-mode switch must be removed (live is the only mode)"
+    print("no demo/simulated machinery in scraper: OK")
 
 
 def _cleanup_test_rows():
-    """Remove synthetic rows so the real-data cache stays tidy."""
+    """Remove test rows so the real-data cache stays tidy."""
     import sqlite3
     conn = sqlite3.connect(scraper._CACHE_DB)
     for prefix in ("cacheuser", "cacheduser", "batchknown", "batchunknown",
                    "disco_main", "disco_rival1", "disco_rival2",
-                   "nevercachedhandle77", "nevercachedhandle"):
+                   "directonlyhandle", "exhaustedhandle", "bothfailhandle"):
         conn.execute("DELETE FROM cache WHERE key LIKE ?", (f"profile:{prefix}%",))
         conn.execute("DELETE FROM cache WHERE key LIKE ?", (f"related:{prefix}%",))
     conn.commit()
@@ -261,12 +264,11 @@ if __name__ == "__main__":
     test_normalize()
     test_cache_roundtrip()
     asyncio.run(test_get_profile_cache_first())
-    asyncio.run(test_unknown_handle_gets_badged_demo())
     asyncio.run(test_batch_mixed())
     asyncio.run(test_live_mode_failover_to_direct_provider())
     asyncio.run(test_live_mode_pool_exhausted_falls_over_to_direct())
     asyncio.run(test_live_mode_honest_error_when_all_providers_fail())
     test_local_discovery()
-    test_demo_determinism()
+    test_no_demo_machinery()
     _cleanup_test_rows()
     print("\nAll offline checks passed.")

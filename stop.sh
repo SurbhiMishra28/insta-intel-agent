@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================
-#  InstaIQ - stop backend (port 8000) + frontend (port 5173)
+#  InstaIQ - stop backend (port 8000) + React UI (port 5173)
 #  Usage: ./stop.sh
 # =============================================================
 cd "$(dirname "$0")"

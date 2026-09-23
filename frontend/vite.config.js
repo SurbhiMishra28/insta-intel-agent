@@ -59,6 +59,20 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       port: 5173,
+      // Accept requests addressed to non-localhost hosts (deployed previews);
+      // localhost needs no entry.
+      allowedHosts: true,
+      // Same-origin API proxy: the UI calls `/api/...` on its own origin and
+      // vite forwards to the backend — no CORS, no per-host VITE_API_URL.
+      proxy: {
+        '/api': {
+          target: 'http://127.0.0.1:8000',
+          changeOrigin: true,
+          // Long analyses (fresh Instagram fetch + LLM chains) can take minutes.
+          timeout: 300000,
+          proxyTimeout: 300000,
+        },
+      },
     },
     preview: {
       host: true,
