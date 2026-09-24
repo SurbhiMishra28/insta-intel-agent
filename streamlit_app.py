@@ -667,7 +667,11 @@ if not st.session_state.dash:
         if not ai.get("available"):
             st.caption("⚙ AI provider unavailable — answers will use the rule-based engine.")
     except Exception:
-        st.caption("⚠ Backend offline — start it with start.bat / start.sh")
+        st.caption(
+            "⚠ Backend offline. If you're viewing this on Streamlit Cloud: open the app's "
+            "**Settings → Secrets** and add  BACKEND_URL = \"https://instaiq-api.vercel.app\"  "
+            "(then reboot the app). Locally: start the FastAPI backend with start.bat."
+        )
     st.stop()
 
 dash = st.session_state.dash
