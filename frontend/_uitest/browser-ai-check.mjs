@@ -51,6 +51,15 @@ try {
   await shot('browser-02-dashboard');
 
   // ---------- 3. Open AI chat ----------
+  // The PWA install banner (z 1100) sits above the chat FAB (z 1001) at the
+  // bottom-right — a real user dismisses it first. Do the same here.
+  await page.evaluate(() => {
+    const later = [...document.querySelectorAll('button')].find(
+      (b) => b.innerText.trim() === 'Maybe later',
+    );
+    if (later) later.click();
+  });
+  await sleep(500);
   await page.click('button[aria-label="Open chat"]');
   await page.waitForSelector('button[aria-label="Send message"]', { timeout: 10000 });
   console.log('[3] chat panel open');
