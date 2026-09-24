@@ -232,7 +232,6 @@ def llm_status() -> dict:
     now, and why did the last one fail (empty = never failed)?"""
     return {
         "configured": bool(LLM_API_KEY),
-        "provider": "nvidia-nim" if LLM_BASE_URL.endswith("nvidia.com/v1") else ("custom" if LLM_BASE_URL else "openai"),
         "model": LLM_MODEL,
         "provider": ai_provider_label(),
         "model_candidates": _llm_model_candidates() if LLM_API_KEY else [],

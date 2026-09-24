@@ -47,7 +47,7 @@ export default function GrowthPlan({ plan }) {
                 <p style={{ fontSize: 12.5, color: 'var(--paper-dim)', margin: '0 0 6px' }}>{idea.why}</p>
                 <p style={{ fontSize: 12.5, color: 'var(--paper)', margin: '0 0 8px', fontStyle: 'italic' }}>{idea.caption_concept}</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {idea.hashtags?.slice(0, 6).map((h) => (
+                  {[...new Set(idea.hashtags || [])].slice(0, 6).map((h) => (
                     <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>
                   ))}
                 </div>
@@ -74,7 +74,7 @@ export default function GrowthPlan({ plan }) {
               <div key={i} style={{ marginBottom: 8 }}>
                 <p style={{ fontSize: 11, color: 'var(--paper-dim)', margin: '0 0 4px' }}>Set {i + 1} — rotate to avoid flagging:</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                  {set.map((h) => <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>)}
+                  {[...new Set(set)].map((h) => <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>)}
                 </div>
               </div>
             ))}

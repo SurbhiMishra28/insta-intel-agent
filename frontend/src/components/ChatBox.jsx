@@ -12,7 +12,7 @@ export default function ChatBox({ context }) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, loading]); // loading too: keep the 'thinking…' bubble in view
 
   const send = async () => {
     if (!input.trim() || loading) return;
@@ -178,7 +178,7 @@ export default function ChatBox({ context }) {
             )}
             {messages.map((m, i) => (
               <div
-                key={i}
+                key={`msg-${i}`}
                 style={{
                   maxWidth: '88%',
                   alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',

@@ -174,7 +174,7 @@ function AudienceTab({ a }) {
           <>
             <p style={{ ...label, marginTop: 14 }}>Niche signals</p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {a.niche_signals.map((s) => (
+              {[...new Set(a.niche_signals)].map((s) => (
                 <span key={s} className="hashtag-chip" style={{ fontSize: 10.5 }}>{s}</span>
               ))}
             </div>
@@ -219,7 +219,7 @@ function TrendingTab({ t }) {
               </p>
             )}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {(tp.hashtags || []).slice(0, 5).map((h) => (
+              {[...new Set(tp.hashtags || [])].slice(0, 5).map((h) => (
                 <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>
               ))}
             </div>
@@ -275,7 +275,7 @@ function RivalContentTab({ rc }) {
                 <>
                   <p style={label}>Tags they own (absent from your sample)</p>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                    {cmp.hashtags_they_own.map((h) => (
+                    {[...new Set(cmp.hashtags_they_own)].map((h) => (
                       <span key={h} className="hashtag-chip" style={{ fontSize: 10.5, background: 'var(--panel-raised)' }}>{h}</span>
                     ))}
                   </div>
@@ -361,7 +361,7 @@ function TopContentTab({ tc }) {
           )}
           {(it.hashtags || []).length > 0 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
-              {it.hashtags.map((h) => (
+              {[...new Set(it.hashtags)].map((h) => (
                 <span key={h} className="hashtag-chip" style={{ fontSize: 10.5 }}>{h}</span>
               ))}
             </div>

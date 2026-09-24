@@ -1644,7 +1644,13 @@ def _extract_insta_handle(message: str) -> Optional[str]:
     if not m:
         m = re.search(r"ig\.me/(?:m/)?([A-Za-z0-9._]+)", text, re.IGNORECASE)
     if not m:
-        m = re.search(r"@([A-Za-z0-9._]{2,30})", text)
+        # (?<![A-Za-z0-9]) rejects email local parts: 'surbhi@gmail.com' must not
+        # be read as a mention of the handle 'gmail.com'.
+        m = re.search(r"(?<![A-Za-z0-9])@([A-Za-z0-9._]{2,30})", text)
+        if m and m.group(1).lower().endswith(
+            ("gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "proton.me", "protonmail.com")
+        ):
+            m = None  # looked like an email domain, not a handle
     if not m:
         m = re.search(r"(?:analyze|analyse|check|look up|lookup|stats for|data for|about)\s+([A-Za-z0-9._]{2,30})\b", text, re.IGNORECASE)
     if not m:
@@ -1724,7 +1730,7 @@ async def chat(req: ChatRequest):
             # fallback still answers instantly if both models miss it.
             answer = await ai_engine._invoke_llm(
                 lambda client: ai_engine._bind_chat_prompt(client, ctx_text, req.message),
-                timeout=float(os.getenv("LLM_CHAT_TIMEOUT", "30")),
+                timeout=float(os.getenv("LLM_CHAT_TIMEOUT", "75")),
             )
             return ChatResponse(
                 answer=str(answer.content or answer),

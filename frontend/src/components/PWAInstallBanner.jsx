@@ -36,7 +36,7 @@ export default function PWAInstallBanner() {
       alignItems: 'center',
       justifyContent: 'space-between',
       gap: 12,
-      zIndex: 1000,
+      zIndex: 1100, // above the chat FAB/panel (1001) so Install / Maybe later stay clickable
       boxShadow: '0 -2px 12px rgba(0,0,0,0.4)',
       fontSize: 13.5,
     }}>

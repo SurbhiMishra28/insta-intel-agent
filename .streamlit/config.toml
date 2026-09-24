@@ -1,0 +1,19 @@
+# InstaIQ Streamlit theme — mirrors the React UI's dark "intelligence report"
+# palette (frontend/src/index.css):
+#   --ink (#15171A)  -> backgroundColor
+#   --panel (#1D2023) -> secondaryBackgroundColor (sidebar, widgets, boxes)
+#   --paper (#ECEAE4) -> textColor
+#   --signal (#C6FF4E) -> primaryColor (buttons, accents, sliders)
+[theme]
+base = "dark"
+primaryColor = "#C6FF4E"
+backgroundColor = "#15171A"
+secondaryBackgroundColor = "#1D2023"
+textColor = "#ECEAE4"
+
+[server]
+port = 8501
+headless = true
+
+[client]
+toolbarMode = "minimal"
