@@ -225,6 +225,11 @@ def apify_token_pool_status() -> List[Dict[str, Any]]:
 # the main account) don't re-trigger a paid actor run within the TTL window.
 _CACHE_TTL = int(os.getenv("PROFILE_CACHE_TTL", "1800"))  # seconds
 _profile_cache: Dict[str, tuple] = {}  # username -> (monotonic_ts, ProfileData)
+# Stale-while-revalidate bookkeeping: handles with a background refresh in
+# flight, and the cooldown after a 401/403/429 before retrying the plain-HTTP
+# API (the keyless HTTP ladder records and honors this).
+_refresh_inflight: set = set()
+_API_BLOCK_COOLDOWN = float(os.getenv("IG_API_BLOCK_COOLDOWN", "600"))
 _related_cache: Dict[str, tuple] = {}  # username -> (monotonic_ts, List[dict])
 _selfheal_attempted: set = set()  # handles whose stats-only cache row got one refetch try
 _CACHE_LOCK = asyncio.Lock()
