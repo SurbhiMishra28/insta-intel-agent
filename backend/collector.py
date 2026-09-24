@@ -6,7 +6,7 @@ and caching behave identically to the app:
 
     1. FETCH    scraper.get_profile(handle)
                 memory cache → SQLite disk cache → live providers
-                (Graph API → Apify → keyless Playwright Chromium/HTTP ladder)
+                (Graph API → Apify → keyless HTTP ladder)
     2. STORE    • backend/profile_cache.db   (app cache — written by the fetch)
                 • backend/scan_history.db    (timeline point via storage.record_metrics)
                 • data/collect/<handle>/<date>.json  (portable collector archive)

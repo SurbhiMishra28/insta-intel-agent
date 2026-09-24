@@ -1,20 +1,13 @@
 FROM python:3.11-slim
 
-# Playwright Chromium powers the keyless direct-fetch path (real Instagram
-# data fetched from inside a real browser page — no relay, no tokens);
-# fonts keep rendered pages natural.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+# Pure-Python fetch path: Instagram data arrives over HTTP (web_profile_info,
+# GraphQL feed, HTML metadata) — no browser, no Chromium, small fast image.
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && playwright install --with-deps chromium
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

@@ -8,7 +8,7 @@ services:
     environment:
       # Compose reads these from your shell or from a .env file next to
       # docker-compose.yml (see backend/.env.example for the full list).
-      # live = real Instagram data via the keyless Playwright Chromium
+      # live = real Instagram data via the keyless HTTP fetch path
       # provider (or Apify when APIFY_TOKEN is set); cache = local cache only;
       # demo = simulated data.
       - APIFY_TOKEN=${APIFY_TOKEN:-}

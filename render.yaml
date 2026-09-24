@@ -45,13 +45,6 @@ services:
       - key: LLM_FALLBACK_MODEL
         value: openai/gpt-oss-20b
       - key: APIFY_TOKEN
-        sync: false          # optional; keyless Playwright provider works without it
+        sync: false          # optional; the keyless HTTP fetch path works without it
       - key: IG_PROXY_URL
         sync: false          # optional; residential proxy for IG fetches
-      # Headless Chromium (keyless Playwright provider) tuning on a small container.
-      - key: IG_CHROME_FETCH
-        value: "true"
-      - key: IG_FETCH_MODE
-        value: "playwright"
-      - key: IG_PERMALINK_POSTS
-        value: "4"

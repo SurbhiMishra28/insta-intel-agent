@@ -339,7 +339,7 @@ async def history_pdf(req: AnalyzeRequest):
     html = _render_history_data_html(profile, metrics, records, source)
     try:
         pdf = await asyncio.get_event_loop().run_in_executor(
-            _LLM_POOL, _chrome_print_pdf, html
+            _LLM_POOL, _render_pdf, html
         )
     except RuntimeError as e:
         return JSONResponse(status_code=503, content={"detail": str(e)})
@@ -850,35 +850,23 @@ async def growth_plan(req: AnalyzeRequest, count: int = Query(4, ge=0, le=10)):
 # PDF export — the full dashboard as a downloadable report
 # ---------------------------------------------------------------------------
 
-def _chrome_print_pdf(html: str) -> bytes:
-    """Render an HTML report to PDF with headless Chrome (already a hard
-    dependency of the keyless data path). Returns raw PDF bytes; raises
-    RuntimeError when no browser is available or printing fails."""
-    import tempfile
-    import os as _os
-
-    chrome = scraper._find_chrome()
-    if not chrome:
+def _render_pdf(html: str) -> bytes:
+    """Render an HTML report to PDF with xhtml2pdf (pure Python — no browser).
+    Returns raw PDF bytes; raises RuntimeError when rendering fails."""
+    try:
+        from xhtml2pdf import pisa
+    except Exception as e:
         raise RuntimeError(
-            "PDF export needs Chrome or Edge installed (used headless for "
-            "rendering). Could not find a browser on this machine."
-        )
-    import subprocess
-    with tempfile.TemporaryDirectory() as td:
-        src = _os.path.join(td, "report.html")
-        out = _os.path.join(td, "report.pdf")
-        with open(src, "w", encoding="utf-8") as f:
-            f.write(html)
-        cmd = [
-            chrome, "--headless=new", "--disable-gpu", "--no-first-run",
-            "--no-pdf-header-footer", f"--print-to-pdf={out}",
-            "file:///" + src.replace("\\", "/"),
-        ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=90)
-        if not _os.path.isfile(out) or _os.path.getsize(out) == 0:
-            raise RuntimeError(f"PDF rendering failed ({proc.returncode}).")
-        with open(out, "rb") as f:
-            return f.read()
+            "PDF export needs the 'xhtml2pdf' package (pip install xhtml2pdf)."
+        ) from e
+    import io as _io
+
+    buf = _io.BytesIO()
+    result = pisa.CreatePDF(_io.StringIO(html), dest=buf, encoding="utf-8")
+    pdf = buf.getvalue()
+    if result.err or not pdf:
+        raise RuntimeError(f"PDF rendering failed ({result.err} errors).")
+    return pdf
 
 
 def _esc(v) -> str:
@@ -1206,7 +1194,7 @@ async def export_pdf(req: AnalyzeRequest, count: int = Query(0, ge=0, le=10)):
     try:
         dash = await _build_full_dashboard(req.username, count)
         pdf = await asyncio.get_event_loop().run_in_executor(
-            _LLM_POOL, _chrome_print_pdf, _render_report_html(dash)
+            _LLM_POOL, _render_pdf, _render_report_html(dash)
         )
     except HTTPException:
         raise  # 400/503 from the data layer pass through untouched

@@ -197,11 +197,11 @@ async def test_live_mode_honest_error_when_all_providers_fail():
         async def failing_direct(username):
             raise RuntimeError("Instagram rate-limiting this IP (simulated)")
 
-        async def failing_playwright(username):
-            raise RuntimeError("Playwright Chromium fetch failed (simulated)")
+        async def failing_direct(username):
+            raise RuntimeError("Keyless HTTP fetch failed (simulated)")
 
         scraper._fetch_direct_profile = failing_direct
-        scraper._fetch_playwright_profile = failing_playwright
+        scraper._fetch_direct_profile = failing_direct
         try:
             await scraper.get_profile("bothfailhandle")
         except RuntimeError:
@@ -210,7 +210,7 @@ async def test_live_mode_honest_error_when_all_providers_fail():
             raise AssertionError("expected RuntimeError, got a (fake) profile instead")
     finally:
         scraper._fetch_direct_profile = _restore_direct
-        scraper._fetch_playwright_profile = _restore_playwright
+        scraper._fetch_direct_profile = failing_direct  # stays failing (provider removed)
         scraper.APIFY_TOKENS = old
         scraper._profile_cache.clear()
         _purge_handle("bothfailhandle")
@@ -232,8 +232,6 @@ def _restore_direct(username: str):
     raise RuntimeError("direct provider not stubbed in this test")
 
 
-def _restore_playwright(username: str):
-    raise RuntimeError("playwright provider not stubbed in this test")
 
 
 def test_no_demo_machinery():
