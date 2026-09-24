@@ -733,8 +733,6 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
                 if w:
                     warnings.append(w)
 
-    plan = await _llm_call(ai_engine.build_growth_plan, main_insight, rivals)
-
     # --- Data-backed extras (all from already-fetched real data) ---
     best_times = analytics.compute_best_times(main_insight)
     cadence_map = analytics.compute_cadence_map(main_insight)
@@ -815,7 +813,6 @@ async def _build_full_dashboard(username: str, count: int) -> GrowthPlanResponse
 
     return GrowthPlanResponse(
         main=main_insight,
-        plan=plan,
         rivals=rivals,
         warnings=[w for w in warnings if w],
         score_explanation=score_explanation,
@@ -966,42 +963,6 @@ footer {{ margin-top: 26px; color: #6b7280; font-size: 8.5pt; border-top: 1px so
         parts.append('<h3>Recommendations</h3><ul>')
         parts.extend(f'<li>{_esc(s)}</li>' for s in d.main.recommendations)
         parts.append('</ul>')
-
-    # --- Growth plan ---
-    plan = d.plan
-    parts.append('<h2>Growth plan</h2>')
-    if getattr(plan, 'summary', ''):
-        parts.append(f'<p>{_esc(plan.summary)}</p>')
-    if plan.content_pillars:
-        parts.append('<h3>Content pillars</h3><ul>')
-        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.content_pillars)
-        parts.append('</ul>')
-    if plan.post_ideas:
-        parts.append('<h3>Ready-to-make post ideas</h3><table><tr><th>Idea</th><th>Format</th><th>Why it works</th></tr>')
-        for idea in plan.post_ideas:
-            parts.append(f'<tr><td><b>{_esc(idea.title)}</b><br><span class="muted">{_esc(idea.caption_concept)}</span></td>'
-                         f'<td>{_esc(idea.format)}</td><td>{_esc(idea.why)}</td></tr>')
-        parts.append('</table>')
-    if plan.weekly_schedule:
-        parts.append('<h3>Weekly schedule</h3><ul>')
-        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.weekly_schedule)
-        parts.append('</ul>')
-    if plan.hashtag_sets:
-        parts.append('<h3>Rotating hashtag sets</h3>')
-        for i, st in enumerate(plan.hashtag_sets, 1):
-            parts.append(f'<p><b>Set {i}:</b> {_esc(" ".join(st))}</p>')
-    if plan.engagement_tactics:
-        parts.append('<h3>Daily engagement tactics</h3><ul>')
-        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.engagement_tactics)
-        parts.append('</ul>')
-    if plan.follower_growth_targets:
-        parts.append('<h3>Follower growth — honest targets</h3><ul>')
-        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.follower_growth_targets)
-        parts.append('</ul>')
-    if plan.quick_wins:
-        parts.append('<h3>Do these today</h3><ol>')
-        parts.extend(f'<li>{_esc(x)}</li>' for x in plan.quick_wins)
-        parts.append('</ol>')
 
     # --- Timing ---
     parts.append('<h2>Timing intelligence</h2>')

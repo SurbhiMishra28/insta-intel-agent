@@ -1268,6 +1268,12 @@ def _extract_lsd_token(html: str) -> str:
     return m.group(1) if m else ""
 
 
+# Bootstrapped anonymous-session cache (cookies + LSD token), shared across
+# fetches for their TTL — one bootstrap per TTL window instead of per request.
+_DIRECT_SESSION_TTL = float(os.getenv("IG_SESSION_TTL", "1800"))
+_direct_session: Dict[str, Any] = {"cookies": None, "lsd": "", "ts": 0.0}
+
+
 def _bootstrap_direct_session() -> tuple:
     """Return (cookie_jar, lsd_token), seeding them from instagram.com when
     missing/stale. Sync (httpx sync client) — call via asyncio.to_thread.

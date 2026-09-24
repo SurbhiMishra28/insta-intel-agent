@@ -382,44 +382,6 @@ def _render_insight(ins: dict, show_posts: bool = True):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def _render_plan(plan: dict):
-    st.markdown("#### Summary")
-    st.write(plan.get("summary") or "—")
-
-    if plan.get("quick_wins"):
-        st.markdown("#### ⚡ Quick wins — do these today")
-        for s in plan["quick_wins"]:
-            st.markdown(f"- {s}")
-    if plan.get("content_pillars"):
-        st.markdown("#### Content pillars")
-        st.markdown(" · ".join(f"**{p}**" for p in plan["content_pillars"]))
-    if plan.get("post_ideas"):
-        st.markdown("#### Post ideas — ready to make")
-        for idea in plan["post_ideas"]:
-            with st.expander(f"{idea.get('title', '?')} · {idea.get('format', 'reel')}"):
-                st.markdown(f"**Why:** {idea.get('why', '')}")
-                st.markdown(f"**Caption concept:** _{idea.get('caption_concept', '')}_")
-                st.markdown(" ".join(f"`#{h}`" for h in (idea.get("hashtags") or [])[:8]))
-    if plan.get("weekly_schedule"):
-        st.markdown("#### Weekly posting schedule")
-        for d in plan["weekly_schedule"]:
-            st.markdown(f"- {d}")
-    if plan.get("format_mix"):
-        st.markdown(f"**Format mix:** {plan['format_mix']}")
-    if plan.get("hashtag_sets"):
-        st.markdown("#### Rotating hashtag sets")
-        for i, set_ in enumerate(plan["hashtag_sets"], 1):
-            st.markdown(f"**Set {i}** — " + " ".join(f"`#{h}`" for h in set_))
-    if plan.get("engagement_tactics"):
-        st.markdown("#### Engagement tactics")
-        for s in plan["engagement_tactics"]:
-            st.markdown(f"- {s}")
-    if plan.get("follower_growth_targets"):
-        st.markdown("#### 30/60/90-day targets")
-        for s in plan["follower_growth_targets"]:
-            st.markdown(f"- {s}")
-
-
 def _render_timing(d: dict):
     bt, cm, rt = d.get("best_times"), d.get("cadence_map"), d.get("reel_timing")
     if bt:
@@ -741,8 +703,8 @@ c4.metric("Cadence", f"{m.get('posting_frequency_per_week', 0)}/wk")
 for w_ in dash.get("warnings") or []:
     st.warning(w_)
 
-tab_dash, tab_plan, tab_timing, tab_tool, tab_trends, tab_intel, tab_dives, tab_hist, tab_chat = st.tabs(
-    ["📈 Dashboard", "🎯 Growth plan", "⏰ Timing", "🧰 Toolkit", "🌊 Trends",
+tab_dash, tab_timing, tab_tool, tab_trends, tab_intel, tab_dives, tab_hist, tab_chat = st.tabs(
+    ["📈 Dashboard", "⏰ Timing", "🧰 Toolkit", "🌊 Trends",
      "🕵 Deep intel", "🔬 Deep dives", "🕘 History", "💬 Chat"]
 )
 
@@ -782,13 +744,6 @@ with tab_dash:
             st.caption("One scan so far — keep analyzing this handle to build a trend.")
     except Exception as e:
         st.caption(f"Growth data unavailable: {str(e)[:80]}")
-
-# --- Growth plan ---------------------------------------------------------------
-with tab_plan:
-    if dash.get("plan"):
-        _render_plan(dash["plan"])
-    else:
-        st.caption("No growth plan in this response.")
 
 # --- Timing ---------------------------------------------------------------
 with tab_timing:

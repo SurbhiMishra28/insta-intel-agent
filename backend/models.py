@@ -137,7 +137,6 @@ class GrowthPlan(BaseModel):
 
 class GrowthPlanResponse(BaseModel):
     main: ProfileInsight
-    plan: GrowthPlan
     rivals: List[ProfileInsight] = []  # researched competitors used as grounding (if any)
     warnings: List[str] = []
     score_explanation: Optional["ScoreExplanation"] = None

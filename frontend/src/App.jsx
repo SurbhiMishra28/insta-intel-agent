@@ -4,7 +4,6 @@ import { fmtCompact as fmtBig } from './format.js';
 import RankingBars from './components/RankingBars.jsx';
 import EngagementChart from './components/EngagementChart.jsx';
 import Report from './components/Report.jsx';
-import GrowthPlanView from './components/GrowthPlan.jsx';
 import FollowerGrowthIcon from './components/FollowerGrowthIcon.jsx';
 import ResearchProgress from './components/ResearchProgress.jsx';
 import BestTimes from './components/BestTimes.jsx';
@@ -449,12 +448,6 @@ export default function App() {
           <Section id="report" accent="violet" label="AI intelligence report">
             <Report insight={main} />
           </Section>
-
-          {dash.plan && (
-            <Section id="plan" accent="green" label="Growth plan — what to post next">
-              <GrowthPlanView plan={dash.plan} />
-            </Section>
-          )}
 
           <Section id="timing" accent="amber" label="Timing intelligence — when to post">
             <div className="grid-2">
