@@ -107,6 +107,17 @@ _LLM_FALLBACK_MODELS = [
 # when the model starts working again elsewhere.
 _LLM_DEAD_MODELS: set = set()
 
+# Cross-provider failover: when EVERY model on the primary provider is dead
+# (e.g. OpenRouter's free daily quota exhausted — 429 on all candidates), the
+# chains fall through to a second OpenAI-compatible provider instead of
+# dropping to rule-based. Configure via env:
+#   LLM_FALLBACK_BASE_URL (e.g. https://integrate.api.nvidia.com/v1)
+#   LLM_FALLBACK_API_KEY  (e.g. nvapi-...)
+#   LLM_FALLBACK_MODEL    (e.g. openai/gpt-oss-20b)
+LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "").strip()
+LLM_FALLBACK_API_KEY = os.getenv("LLM_FALLBACK_API_KEY", "").strip()
+LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "").strip()
+
 
 def ai_provider_label() -> str:
     """Human-readable AI provider for status endpoints."""
@@ -117,13 +128,37 @@ def ai_provider_label() -> str:
 
 
 def _llm_model_candidates() -> List[str]:
-    """Ordered model ids to try: configured primary first, then fallbacks,
-    minus ids already known-dead this process."""
+    """Ordered model ids on the PRIMARY provider: configured primary first,
+    then fallbacks, minus ids already known-dead this process."""
     seen: List[str] = []
     for m in [LLM_MODEL, *_LLM_FALLBACK_MODELS]:
         if m and m not in seen and m not in _LLM_DEAD_MODELS:
             seen.append(m)
     return seen
+
+
+def _llm_candidate_specs() -> List[dict]:
+    """Ordered (label, base_url, api_key, model) attempts: every live model on
+    the primary provider first, then the fallback provider's model when one
+    is configured. Dead models are skipped process-wide."""
+    specs: List[dict] = []
+    seen: set = set()
+    for m in _llm_model_candidates():
+        specs.append({
+            "label": m,
+            "base_url": LLM_BASE_URL or None,
+            "api_key": LLM_API_KEY,
+            "model": m,
+        })
+        seen.add(m)
+    if LLM_FALLBACK_API_KEY and LLM_FALLBACK_MODEL and LLM_FALLBACK_MODEL not in _LLM_DEAD_MODELS:
+        specs.append({
+            "label": f"{LLM_FALLBACK_MODEL} [fallback]",
+            "base_url": LLM_FALLBACK_BASE_URL or None,
+            "api_key": LLM_FALLBACK_API_KEY,
+            "model": LLM_FALLBACK_MODEL,
+        })
+    return specs
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +269,7 @@ def llm_status() -> dict:
         "configured": bool(LLM_API_KEY),
         "model": LLM_MODEL,
         "provider": ai_provider_label(),
-        "model_candidates": _llm_model_candidates() if LLM_API_KEY else [],
+        "model_candidates": [s["label"] for s in _llm_candidate_specs()] if LLM_API_KEY else [],
         "available": _llm_available() if LLM_API_KEY else False,
         "breaker_open_until": _LLM_BREAKER["open_until"],
         "breaker_reason": _LLM_BREAKER["reason"],
@@ -242,17 +277,20 @@ def llm_status() -> dict:
     }
 
 
-def _client_for_model(model: str, temperature: float = LLM_TEMPERATURE):
-    """Shared ChatOpenAI client per (model, temperature)."""
-    key = (model, temperature)
+def _client_for_model(model: str, temperature: float = LLM_TEMPERATURE,
+                      base_url: str | None = None, api_key: str | None = None):
+    """Shared ChatOpenAI client per (provider, model, temperature)."""
+    base_url = LLM_BASE_URL if base_url is None else base_url
+    api_key = LLM_API_KEY if api_key is None else api_key
+    key = (base_url or "", model, temperature)
     cached = _LLM_CACHE.get(key)
     if cached is not None:
         return cached
     from langchain_openai import ChatOpenAI
     base = dict(
         model=model,
-        api_key=LLM_API_KEY,
-        base_url=LLM_BASE_URL or None,
+        api_key=api_key,
+        base_url=base_url or None,
         temperature=temperature,
         # Zero SDK retries: _invoke_llm/_invoke_llm_sync own failover at the
         # model level. The SDK's silent in-request retry doubled every hang
@@ -342,11 +380,12 @@ async def _invoke_llm(run, timeout: float | None = None):
     deadline = time.monotonic() + total
     errors: list = []
     loop = _asyncio.get_event_loop()
-    for model in _llm_model_candidates():
+    for spec in _llm_candidate_specs():
+        model = spec["model"]
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             break
-        client = _client_for_model(model)
+        client = _client_for_model(model, base_url=spec["base_url"], api_key=spec["api_key"])
         try:
             result = await _asyncio.wait_for(
                 loop.run_in_executor(None, run, client), timeout=min(remaining, per_attempt)
@@ -359,15 +398,15 @@ async def _invoke_llm(run, timeout: float | None = None):
             # model runs on a DIFFERENT upstream, so one hang says nothing
             # about the next candidate — advance to it (bounded by deadline).
             used = min(remaining, per_attempt)
-            errors.append(f"{model}: attempt exceeded {used:.0f}s deadline")
+            errors.append(f"{spec['label']}: attempt exceeded {used:.0f}s deadline")
             _LLM_LAST_ERROR = errors[-1]
-            print(f"[llm] {model}: attempt exceeded {used:.0f}s deadline — trying next model", flush=True)
+            print(f"[llm] {spec['label']}: attempt exceeded {used:.0f}s deadline — trying next", flush=True)
             continue
         except Exception as e:  # noqa: BLE001 — classify everything
             kind = _classify_llm_error(e)
-            errors.append(f"{model}: {str(e)[:120]}")
-            _LLM_LAST_ERROR = f"{model}: {str(e)[:200]}"
-            print(f"[llm] model {model} failed ({kind}): {str(e)[:120]}", flush=True)
+            errors.append(f"{spec['label']}: {str(e)[:120]}")
+            _LLM_LAST_ERROR = f"{spec['label']}: {str(e)[:200]}"
+            print(f"[llm] candidate {spec['label']} failed ({kind}): {str(e)[:120]}", flush=True)
             if "timed out" in str(e).lower() or "timeout" in str(e).lower():
                 # ReadTimeout = that model's upstream hung. On routed
                 # providers the next model is a different upstream — advance.
@@ -397,20 +436,21 @@ def _invoke_llm_sync(run, timeout: float | None = None, temperature: float = LLM
     per_attempt = float(os.getenv("LLM_PER_ATTEMPT_TIMEOUT", "0")) or total / 2
     deadline = time.monotonic() + total
     errors: list = []
-    for model in _llm_model_candidates():
+    for spec in _llm_candidate_specs():
+        model = spec["model"]
         remaining = deadline - time.monotonic()
         if remaining <= 1:
             break
-        client = _client_for_model(model, temperature)
+        client = _client_for_model(model, temperature, base_url=spec["base_url"], api_key=spec["api_key"])
         try:
             result = run(client)  # blocking — caller owns the thread
             _llm_note_success()
             return result
         except Exception as e:  # noqa: BLE001 — classify everything
             kind = _classify_llm_error(e)
-            errors.append(f"{model}: {str(e)[:120]}")
-            _LLM_LAST_ERROR = f"{model}: {str(e)[:200]}"
-            print(f"[llm] model {model} failed ({kind}): {str(e)[:120]}", flush=True)
+            errors.append(f"{spec['label']}: {str(e)[:120]}")
+            _LLM_LAST_ERROR = f"{spec['label']}: {str(e)[:200]}"
+            print(f"[llm] candidate {spec['label']} failed ({kind}): {str(e)[:120]}", flush=True)
             if "timed out" in str(e).lower() or "timeout" in str(e).lower():
                 # ReadTimeout = that model's upstream hung. On routed
                 # providers the next model is a different upstream — advance.
