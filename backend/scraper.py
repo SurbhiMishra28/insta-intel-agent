@@ -39,6 +39,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -892,8 +893,10 @@ async def _run_with_failover(run_input: Dict[str, Any], actor_path: str) -> List
             await asyncio.to_thread(_apify_preflight_check, token)
             items = await _actor_call(token, run_input, actor_path)
             _token_state[token] = {"status": "ready", "detail": "", "until": 0}
+            record_fetch_event("ok", f"Apify actor run OK ({_token_label(idx)}, {len(items)} items)")
             return items
         except ApifyTokenError as e:
+            record_fetch_event("fail", f"Apify {_token_label(idx)}: {str(e)[:120]}")
             errors.append(f"{_token_label(idx)}: {e}")
             continue
     raise RuntimeError(_aggregate_token_errors(errors))
@@ -2653,6 +2656,7 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
             # Likes hidden by Instagram (or stripped by xdt nodes) get real
             # values from the posts' permalink pages before caching.
             perf.stage("web_profile_info OK")
+            record_fetch_event("ok", f"@{username} via web_profile_info (keyless HTTP)")
             result = await _backfill_missing_likes(profile)
             perf.stage("backfill done")
             _chrome_no_longer_needed()
@@ -2730,8 +2734,13 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     # Nothing better than real stats without engagement — serve the HTML
     # floor rather than failing outright (it is real data).
     if html_floor is not None:
+        record_fetch_event("ok", f"@{username} stats-only via HTML floor (no posts)")
         return html_floor
 
+    record_fetch_event(
+        "blocked",
+        f"keyless ladder failed for @{username} (HTTP {last_status or 'n/a'}): {last_err}",
+    )
     raise RuntimeError(
         f"Keyless direct fetch failed for @{username} "
         f"(last HTTP status {last_status or 'n/a'}"
@@ -3008,6 +3017,7 @@ async def _fetch_playwright_profile(username: str) -> ProfileData:
                             last = last or str(e)[:120]
                     if profile is not None:
                         perf.stage("OK")
+                        record_fetch_event("ok", f"@{uname} via Playwright Chromium in-page query")
                         return await _backfill_missing_likes(profile)
                 finally:
                     try:
@@ -3027,6 +3037,7 @@ async def _fetch_playwright_profile(username: str) -> ProfileData:
         # A raw Playwright error escaping here would crash get_profile's
         # provider ladder instead of moving on.
         raise RuntimeError(f"Playwright fetch error: {str(e)[:140]}")
+    record_fetch_event("fail", f"Playwright Chromium: {last}")
     raise RuntimeError(
         f"Playwright Chromium fetch failed for @{uname} ({last}) — Instagram "
         "blocked the in-page query and the page carried no usable data."
@@ -3503,6 +3514,69 @@ async def get_profiles_batch(usernames: List[str]) -> Dict[str, ProfileData]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Diagnostics — fetch-event ring buffer + environment snapshot (cloud debug)
+# ---------------------------------------------------------------------------
+
+_FETCH_EVENTS: deque = deque(maxlen=50)  # (at, kind, detail) — most recent last
+
+
+def record_fetch_event(kind: str, detail: str) -> None:
+    """Record one fetch outcome for /api/diagnostics.
+
+    kind: 'ok' | 'fail' | 'blocked'. Kept tiny and never raises — diagnostics
+    must not be able to break a fetch. Secrets are never recorded.
+    """
+    try:
+        _FETCH_EVENTS.append(
+            {
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "kind": kind,
+                "detail": str(detail)[:200],
+            }
+        )
+    except Exception:
+        pass
+
+
+def diagnostics() -> dict:
+    """Cloud-debug snapshot for /api/diagnostics.
+
+    Reports browser availability (with a REAL headless-launch version probe),
+    provider configuration with secrets masked, and the last 50 fetch events
+    — so a deployment that cannot fetch can be diagnosed from the outside.
+    """
+    chromium: dict = {"host_chrome": _find_chrome(), "managed_version": None, "launch_error": ""}
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=_CHROME_CONTAINER_FLAGS)
+            try:
+                chromium["managed_version"] = browser.version
+            finally:
+                browser.close()
+    except Exception as e:
+        chromium["launch_error"] = str(e)[:160]
+
+    return {
+        "chromium": chromium,
+        "playwright_importable": _playwright_available(),
+        "providers": {
+            "apify_tokens_configured": len(APIFY_TOKENS),
+            "graph_api_configured": _has_graph_credentials(),
+            "direct_fetch_enabled": DIRECT_FETCH_ENABLED,
+            "ig_proxy_set": bool((_IG_PROXY_URL or "").strip()),
+        },
+        "env": {
+            "ig_fetch_mode": os.getenv("IG_FETCH_MODE", "playwright"),
+            "ig_chrome_fetch": os.getenv("IG_CHROME_FETCH", "true"),
+            "ig_permalink_posts": os.getenv("IG_PERMALINK_POSTS", "12"),
+        },
+        "recent_fetch_events": list(_FETCH_EVENTS),
+    }
+
+
 async def get_profile(username: str) -> ProfileData:
     """Profile fetch with latency layers (REAL DATA ONLY):
 
@@ -3524,6 +3598,11 @@ async def get_profile(username: str) -> ProfileData:
     # Layer 2: disk (offloaded to a thread; SQLite is sync).
     disk = await asyncio.to_thread(_disk_profile_get, username)
     if disk is not None:
+        record_fetch_event(
+            "ok",
+            f"@{username} served from disk cache"
+            + (f" (age {disk.data_age_hours:.0f}h)" if getattr(disk, 'data_age_hours', None) is not None else ""),
+        )
         # Self-heal: a cached REAL profile without posts (stats-only row from
         # an earlier throttled fetch) is re-fetched ONCE per process per
         # handle, so real engagement fills in as soon as a provider can
@@ -3658,6 +3737,9 @@ async def get_profile(username: str) -> ProfileData:
             try:
                 gw_profile = await _fetch_playwright_profile(username)
             except (RuntimeError, httpx.HTTPError) as gw_err:
+                record_fetch_event(
+                    "blocked", f"@{username}: every provider failed — {str(gw_err)[:150]}"
+                )
                 print(
                     f"[fetch] @{username}: every real-data provider failed "
                     f"({str(gw_err)[:120]}) — raising an honest error"

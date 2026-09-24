@@ -1752,6 +1752,18 @@ async def ai_status():
     return ai_engine.llm_status()
 
 
+@app.get("/api/diagnostics")
+async def fetch_diagnostics():
+    """Cloud-debug snapshot: browser availability (with a real headless-launch
+    probe), provider/secret configuration (masked), and the last 50 fetch
+    events. Answers 'why can't this deployment fetch?' without SSH access."""
+    # diagnostics() launches a sync Playwright probe — that must run off the
+    # event loop (a worker thread), or Playwright refuses with the
+    # "Sync API inside the asyncio loop" error.
+    import asyncio as _asyncio
+    return await _asyncio.to_thread(scraper.diagnostics)
+
+
 def _rule_based_chat(message: str, context: Optional[str], live: Optional[dict] = None, live_err: str = "") -> str:
     """Deterministic fallback for the chat endpoint.
 
