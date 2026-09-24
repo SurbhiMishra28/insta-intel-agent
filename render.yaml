@@ -35,6 +35,15 @@ services:
         value: https://openrouter.ai/api/v1
       - key: LLM_MODEL
         value: nvidia/nemotron-3-super-120b-a12b:free
+      # Cross-provider failover: when every OpenRouter free model hits its
+      # daily 429 quota, chains fall through to this NVIDIA NIM key instead
+      # of dropping to rule-based answers. Set the key in the dashboard.
+      - key: LLM_FALLBACK_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: LLM_FALLBACK_API_KEY
+        sync: false          # set in dashboard: NVIDIA NIM key (nvapi-...)
+      - key: LLM_FALLBACK_MODEL
+        value: openai/gpt-oss-20b
       - key: APIFY_TOKEN
         sync: false          # optional; keyless Playwright provider works without it
       - key: IG_PROXY_URL
