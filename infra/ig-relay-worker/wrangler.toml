@@ -1,0 +1,15 @@
+# Cloudflare Worker deploy config for the InstaIQ keyless Instagram relay.
+#
+# One-command deploy (free, no API token — wrangler opens a browser OAuth):
+#   cd infra/ig-relay-worker
+#   npx wrangler deploy
+#
+# Then set the printed URL in the backend env (Vercel/Render dashboard):
+#   IG_RELAY_URL=https://ig-relay.<your-subdomain>.workers.dev
+
+name = "ig-relay"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# No routes/secrets needed: the Worker is stateless and CORS-open, and the
+# backend calls it as https://<url>/?url=https://www.instagram.com/<handle>/

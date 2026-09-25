@@ -2360,6 +2360,8 @@ def diagnostics() -> dict:
         "env": {
             "ig_fetch_mode": os.getenv("IG_FETCH_MODE", "http"),
             "ig_permalink_posts": os.getenv("IG_PERMALINK_POSTS", "12"),
+            "self_relay_configured": bool(_SELF_RELAY_URL),
+            "relay_cooldown_active": time.monotonic() < _relay_down_until,
         },
         "recent_fetch_events": list(_FETCH_EVENTS),
     }
