@@ -24,7 +24,7 @@ cd instaiq/backend
 ```bash
 cp env.aapanel.example .env
 nano .env        # fill LLM_API_KEY, etc. (no Instagram token needed)
-playwright install chromium   # one-time: browser for the keyless IG fetch
+# No browser install needed: the IG fetch layer is pure HTTP (no Playwright).
 ```
 
 ## 4. Dependencies

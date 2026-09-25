@@ -46,7 +46,7 @@ try {
   await page.click('.scanner-submit');
   await page.waitForSelector('.dash-hero-top h2', { timeout: 560000 });
   const dashHandle = await page.$eval('.dash-hero-top h2', (el) => el.textContent.trim());
-  const stats = await page.$$eval('.dash-hero .stat-box', (els) => els.length);
+  const stats = await page.$$eval('.dash-hero .stat', (els) => els.length);
   console.log(`[2] dashboard rendered: ${dashHandle} (${stats} stat boxes)`);
   await shot('browser-02-dashboard');
 

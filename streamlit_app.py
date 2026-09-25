@@ -832,7 +832,7 @@ with tab_hist:
         mime="application/json",
     )
     if st.button("⬇️ Export PDF report", type="secondary"):
-        with st.spinner("Rendering PDF via headless Chromium…"):
+        with st.spinner("Rendering PDF (server-side, no browser)…"):
             try:
                 pdf_resp = _client.post("/api/export/pdf", json={"username": p["username"]}, params={"count": 0})
                 pdf_resp.raise_for_status()

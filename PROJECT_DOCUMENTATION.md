@@ -48,8 +48,7 @@ insta-intel-agent/
 │       ├── ProfileReadout.jsx   Profile stats grid (followers, ER, cadence…)
 │       ├── RankingBars.jsx      Competitive ranking bar chart
 │       ├── EngagementChart.jsx  Engagement-rate comparison chart
-│       ├── Report.jsx           AI report: summary, strengths/weaknesses, recs
-│       └── GrowthPlan.jsx       Content + follower-growth plan view
+│       └── Report.jsx           AI report: summary, strengths/weaknesses, recs
     ├── index.html             HTML shell
     ├── vite.config.js         Vite dev-server/build config
     ├── nginx.conf             Production reverse-proxy config (Docker)
@@ -126,7 +125,7 @@ Base URL: `http://localhost:8000` · Interactive docs: `http://localhost:8000/do
 | POST | `/api/analyze` | Analyze one profile → `ProfileInsight` |
 | POST | `/api/discover?limit=10` | List candidate competitors for a handle (cheap; no per-competitor fetch) |
 | POST | `/api/competitor-research?count=5..10` | **Full pipeline**: profile + auto-found, deeply researched competitors + market research |
-| POST | `/api/growth-plan?count=0..10` | **Content + growth plan**: what to post for more likes/comments/follows — pillars, ready-to-make post ideas, weekly schedule, hashtag sets, engagement tactics, honest follower targets. `count>0` (default 4) auto-researches rivals to ground the advice |
+| POST | `/api/growth-plan?count=0..10` | **Full dashboard** (historical name): profile + AI report + timing + toolkit + trends + deep intel in one response. `count>0` (default 4) auto-researches rivals to ground the sections |
 | POST | `/api/compare` | Compare against specific handles; empty `competitor_usernames` = auto-discover |
 
 **Example — full competitor research:**
@@ -185,7 +184,7 @@ clear message; missing/misconfigured provider token → HTTP 503.
 | `analyze_profile()` | Per-profile report via the **insight chain** (`ProfileNarrative` structured output); rule-based fallback |
 | `pick_competitors()` | Selects 5–10 rivals from candidates via the **competitor-selection chain**; deterministic fallback (log-scale closeness + topical bonus) |
 | `build_market_research()` | Competitive-set analysis via the **market-research chain** (`MarketResearch`: gaps, content gaps, opportunities); rule-based fallback |
-| `build_growth_plan()` | **Growth-plan chain**: content pillars, 6–8 ready-to-make post ideas (title/format/why/caption hook/hashtags), weekly schedule, rotating hashtag sets, daily engagement tactics, honest 30/60/90-day follower targets; rule-based fallback planner; grounded in the account's real posts + researched rivals |
+
 | `composite_score()` | Deterministic ranking score (engagement + cadence + verification) |
 | `_get_llm()` | Builds `ChatOpenAI` (any OpenAI-compatible endpoint) when `LLM_API_KEY` is set; otherwise chains run in rule-based mode |
 
@@ -196,7 +195,8 @@ shapes · `AnalyzeRequest`, `CompareRequest` — inputs (`competitor_usernames`
 empty ⇒ auto-discover) · `CompareResponse`, `CompetitorResearchResponse`,
 `DiscoveredCompetitor` — outputs (research responses add `content_gaps`,
 `opportunities`, `selection_rationale`, `warnings`, `candidates_found`) ·
-`PostIdea`, `GrowthPlan`, `GrowthPlanResponse` — growth-plan outputs.
+`GrowthPlanResponse` — the full-dashboard response shape (no growth-plan
+plan object; the plan generator was removed from the project).
 
 ---
 
@@ -265,7 +265,7 @@ Vercel/Netlify (root `frontend`, build `npm run build`, out `dist`, env
 
 | Check | Result |
 |---|---|
-| `POST /api/growth-plan` `@nasa` | plan grounded in 104M-follower real data + 4 auto-researched rivals (nasastennis, nasaarmstrong, nasa_marshall, sciencechannel); 6 post ideas with hashtags, 7-day schedule, honest targets |
+| `POST /api/growth-plan` `@nasa` | full dashboard grounded in 104M-follower real data + 4 auto-researched rivals (nasastennis, nasaarmstrong, nasa_marshall, sciencechannel); timing, toolkit, trends and deep-intel sections |
 | Offline unit checks (`python _sanity_check.py`) | all pass (normalization, mapping, timestamps, cache, token-error path) |
 | `POST /api/analyze` `@nasa` | 104.4M followers, verified, real bio, real per-post likes/comments, ER 0.384% |
 | `POST /api/competitor-research` `@nasa` | 30 candidates → 5 rivals researched (sciencechannel, astrophysicsmania, natgeotv, rubin_observatory, harvard); ranking, gaps, opportunities |

@@ -1248,8 +1248,8 @@ _DIRECT_HEADERS = {
     "origin": "https://www.instagram.com",
 }
 
-# Outbound proxy for the keyless Instagram layer (httpx clients + headless
-# Chrome). Cloud hosts (Render/Railway/Fly) get their datacenter IPs hard-
+# Outbound proxy for the keyless Instagram HTTP layer (httpx clients).
+# Cloud hosts (Render/Railway/Fly) get their datacenter IPs hard-
 # blocked by Instagram — 401/429 on every call — while the same code works
 # from residential IPs. Setting IG_PROXY_URL (e.g. a Webshare/IPRoyal
 # residential proxy) routes every Instagram request through it and restores
@@ -2263,8 +2263,8 @@ def record_fetch_event(kind: str, detail: str) -> None:
 def diagnostics() -> dict:
     """Cloud-debug snapshot for /api/diagnostics.
 
-    Reports browser availability (with a REAL headless-launch version probe),
-    provider configuration with secrets masked, and the last 50 fetch events
+    Reports the fetch-layer configuration (pure HTTP, no browser in the fetch
+    path), provider state with secrets masked, and the last 50 fetch events
     — so a deployment that cannot fetch can be diagnosed from the outside.
     """
 

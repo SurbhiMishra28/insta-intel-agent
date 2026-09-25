@@ -146,8 +146,8 @@ export default function App() {
     setTrendsData(null);
     try {
       setStage('Fetching real profile data…');
-      const plan = await post('/api/growth-plan?count=4', { username: handle });
-      setDash(plan);
+      const dash = await post('/api/growth-plan?count=4', { username: handle });
+      setDash(dash);
       setStage('');
     } catch (err) {
       setError(err.message || 'Something went wrong.');
@@ -282,7 +282,6 @@ export default function App() {
   const navSections = [
     ['profile', 'Profile'],
     ['report', 'AI report'],
-    ['plan', 'Growth plan'],
     ['timing', 'Timing'],
     ['toolkit', 'Toolkit'],
     ['trends', 'Trends'],

@@ -111,9 +111,10 @@ check("POST /api/review", ok and isinstance(d, dict) and len(json.dumps(d)) > 20
 
 ok, d, code, t = call("POST", "/api/growth-plan?count=2", {"username": HANDLE}, timeout=300)
 if ok and d:
-    check("growth-plan: main insight + plan", d.get("main", {}).get("profile", {}).get("username", "").lower() == HANDLE.lower() and d.get("plan") is not None)
-    plan = d.get("plan", {})
-    check("growth-plan: post ideas + pillars", len(plan.get("post_ideas", [])) > 0 and len(plan.get("content_pillars", [])) > 0)
+    # /api/growth-plan returns the FULL DASHBOARD (profile + metrics + timing +
+    # toolkit + intel). The growth-plan generator itself was removed.
+    check("growth-plan: main insight + dashboard sections", d.get("main", {}).get("profile", {}).get("username", "").lower() == HANDLE.lower() and "best_times" in d)
+    check("growth-plan: history recorded", isinstance(d.get("history"), list))
 else:
     check("POST /api/growth-plan", False, f"status={code} {t}")
 

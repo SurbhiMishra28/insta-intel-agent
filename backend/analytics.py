@@ -812,7 +812,7 @@ def build_monthly_review(
             ),
             recommendations=[
                 "This is your first scan — it's now your baseline. Come back in 7-14 days and run another analysis to see how your engagement and followers are moving.",
-                "In the meantime, check the growth plan for actionable steps to improve these numbers before your next scan.",
+                "In the meantime, the AI report and timing sections below list concrete steps to improve these numbers before your next scan.",
             ],
             warnings=[
                 "Only 1 scan on record — trend lines will appear after your second scan.",

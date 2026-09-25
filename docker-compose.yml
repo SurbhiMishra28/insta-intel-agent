@@ -15,7 +15,8 @@ services:
       - APIFY_ACTOR_ID=${APIFY_ACTOR_ID:-apify/instagram-scraper}
       - APIFY_RUN_TIMEOUT=${APIFY_RUN_TIMEOUT:-300}
       - PROFILE_CACHE_TTL=${PROFILE_CACHE_TTL:-1800}
-      - FALLBACK_TO_DEMO=${FALLBACK_TO_DEMO:-false}
+      # REAL DATA ONLY: there is no demo/simulated fallback in this system —
+      # fetch failures surface as honest 503/400 errors.
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-}
       - LLM_MODEL=${LLM_MODEL:-openai/gpt-oss-20b}

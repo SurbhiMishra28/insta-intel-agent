@@ -113,28 +113,6 @@ class CompetitorResearchResponse(BaseModel):
     candidates_found: int = 0
 
 
-class PostIdea(BaseModel):
-    """One concrete, ready-to-make post suggestion."""
-    title: str                      # e.g. "3 ceramics mistakes beginners make"
-    format: str = "reel"            # reel | carousel | image | video
-    why: str = ""                   # why this should drive likes/comments/follows
-    caption_concept: str = ""       # what the caption should say / hook line
-    hashtags: List[str] = []        # ready-to-paste hashtags
-
-
-class GrowthPlan(BaseModel):
-    """Actionable plan to grow followers, likes and comments."""
-    summary: str
-    content_pillars: List[str] = []          # 3-4 recurring themes to post around
-    post_ideas: List[PostIdea] = []          # 6-8 concrete post suggestions
-    weekly_schedule: List[str] = []          # Mon..Sun posting plan
-    format_mix: str = ""                     # recommended reel/carousel/image ratio
-    hashtag_sets: List[List[str]] = []       # rotating ready-to-paste sets
-    engagement_tactics: List[str] = []       # daily actions that lift comments
-    follower_growth_targets: List[str] = []  # honest 30/60/90-day estimates
-    quick_wins: List[str] = []               # things to do today
-
-
 class GrowthPlanResponse(BaseModel):
     main: ProfileInsight
     rivals: List[ProfileInsight] = []  # researched competitors used as grounding (if any)
@@ -151,6 +129,9 @@ class GrowthPlanResponse(BaseModel):
     review: Optional["MonthlyReviewResponse"] = None
     history: List["ScanRecord"] = []
     intel: Optional["IntelResponse"] = None  # six deep-intel sections (dashboard + PDF)
+    # NOTE: this model is the FULL dashboard response (score, timing, toolkit,
+    # trends, intel...). Despite the historical name it carries no growth plan:
+    # the plan generator was removed from the project.
 
 
 class BestTimeSlot(BaseModel):

@@ -50,7 +50,7 @@ def _analyze_fast(profiles):
 
 
 async def _llm_call(fn, *args):
-    """Run a blocking LLM chain builder (market research, growth plan) off
+    """Run a blocking LLM chain builder (market research, competitor pick) off
     the event loop so the server stays responsive while it thinks."""
     return await asyncio.get_event_loop().run_in_executor(_LLM_POOL, fn, *args)
 
@@ -92,8 +92,8 @@ app = FastAPI(
         "strongest competitors, and produces an AI-written competitive "
         "intelligence report. All profile data is REAL — fetched via the "
         "official Graph API (when configured), Apify (when configured), or "
-        "the keyless Playwright Chromium headless provider. Unknown handles "
-        "return an honest 400, never simulated numbers."
+        "the keyless direct Instagram HTTP layer (no browser, no tokens). "
+        "Unknown handles return an honest 400, never simulated numbers."
     ),
     version="3.0.0",
 )
@@ -113,7 +113,7 @@ def root():
         "status": "ok",
         "service": "insta-intel-agent",
         "data_mode": "live (real data only)",
-        "data_source": "Graph API / Apify / keyless Playwright Chromium + local cache",
+        "data_source": "Graph API / Apify / keyless direct Instagram HTTP + local cache",
         "ai_engine": ai_engine.ai_provider_label(),
     }
 
@@ -126,7 +126,7 @@ def health():
 async def _load_real_history_profile(uname: str):
     """Best available REAL snapshot for a previously searched handle:
     fresh disk row → any non-simulated disk row (≤30 days) → keyless
-    Instagram GraphQL refresh (Chrome page fetch, no Apify spend).
+    Instagram GraphQL refresh (direct HTTP fetch, no Apify spend).
     Returns (profile | None, source). NEVER returns simulated data."""
     profile = await asyncio.to_thread(scraper._disk_profile_get, uname)
     if profile is None or getattr(profile, "data_age_hours", None) == -1:
@@ -162,9 +162,9 @@ async def restore(req: AnalyzeRequest):
 
     REAL DATA ONLY: the handle must exist in the agent's recorded scan
     history (scan_history.db) — accounts never searched through the agent
-    are refused with 404. The stored snapshot of the account (profile_cache
+    are refused with 404. The stored    snapshot of the account (profile_cache
     .db, always real fetched data) is served instantly and enriched with a
-    keyless Instagram GraphQL refresh (Chrome page fetch) when available;
+    keyless Instagram GraphQL refresh (direct HTTP fetch) when available;
     Apify credits are never spent on a restore. If both the stored snapshot
     and the GraphQL refresh are unavailable the request fails honestly —
     simulated data is never served."""
@@ -420,9 +420,8 @@ def data_source_info():
     if not live:
         live_note = (
             "Live mode fetches real Instagram data with zero credentials via "
-            "the keyless Playwright Chromium provider: a real headless browser "
-            "opens instagram.com and reads Instagram's own web_profile_info "
-            "JSON from inside the page, so no relay/token is involved. "
+            "the keyless direct Instagram HTTP layer (web_profile_info / "
+            "GraphQL, no browser involved), so no relay/token is involved. "
             "Apify tokens (optional) are used first when configured."
         )
     elif pool and healthy_tokens == 0:
@@ -1703,12 +1702,11 @@ async def ai_status():
 
 @app.get("/api/diagnostics")
 async def fetch_diagnostics():
-    """Cloud-debug snapshot: browser availability (with a real headless-launch
-    probe), provider/secret configuration (masked), and the last 50 fetch
-    events. Answers 'why can't this deployment fetch?' without SSH access."""
-    # diagnostics() launches a sync Playwright probe — that must run off the
-    # event loop (a worker thread), or Playwright refuses with the
-    # "Sync API inside the asyncio loop" error.
+    """Cloud-debug snapshot: fetch-layer configuration (HTTP-only, no
+    browser), provider/secret state (masked), and the last 50 fetch events.
+    Answers 'why can't this deployment fetch?' without SSH access."""
+    # diagnostics() builds a pure in-process snapshot — no I/O — but a worker
+    # thread keeps the event loop responsive regardless.
     import asyncio as _asyncio
     return await _asyncio.to_thread(scraper.diagnostics)
 
@@ -1776,7 +1774,7 @@ def _rule_based_chat(message: str, context: Optional[str], live: Optional[dict] 
                 "the fastest levers are (1) post 3-4x/week led by reels, "
                 "(2) reply to every comment in the first hour, (3) spend 15 min/day "
                 "genuinely engaging in your niche, and (4) end captions with a direct "
-                "question. Check the growth plan tab for the 30-day roadmap."
+                "question. Open the Ask AI chat for the levers that move followers and comments."
             )
         return (
             "The most reliable levers for follower growth: (1) post 3-4x/week with reels-led content, "
@@ -1822,7 +1820,7 @@ def _rule_based_chat(message: str, context: Optional[str], live: Optional[dict] 
     if "best time" in lower or "when to post" in lower or "posting time" in lower:
         return (
             "The best time to post depends on when YOUR audience is online. The app computes this from your "
-            "actual post timestamps — check the 'Best time to post' section in the growth plan. "
+            "actual post timestamps — check the 'Timing intelligence' section in the dashboard. "
             "As a rule of thumb, mornings before 10am and evenings 6-9pm local time tend to work well."
         )
 

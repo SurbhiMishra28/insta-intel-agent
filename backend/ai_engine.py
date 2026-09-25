@@ -45,8 +45,6 @@ load_dotenv()
 
 from models import (
     CaptionSuggestion,
-    GrowthPlan,
-    PostIdea,
     ProfileData,
     ProfileInsight,
     ProfileMetrics,
@@ -217,7 +215,7 @@ _LLM_BREAKER = {"open_until": 0.0, "reason": ""}
 _LLM_BREAKER_COOLDOWN = float(os.getenv("LLM_BREAKER_COOLDOWN", "120"))
 # A pure TIMEOUT is not evidence the provider is down: NIM's free tier
 # regularly runs 30-60s+ under contention, and one slow chain (insight,
-# growth plan) must not kill chat — which answers in ~6s — for the whole
+# market research) must not kill chat — which answers in ~6s — for the whole
 # cooldown. Timeouts open this SHORT breaker; hard errors (4xx, connection,
 # parse failures) open the full one.
 _LLM_BREAKER_COOLDOWN_SOFT = float(os.getenv("LLM_BREAKER_COOLDOWN_SOFT", "8"))
@@ -419,7 +417,7 @@ async def _invoke_llm(run, timeout: float | None = None):
 
 def _invoke_llm_sync(run, timeout: float | None = None, temperature: float = LLM_TEMPERATURE):
     """Sync twin of _invoke_llm for chains that run in worker threads
-    (analyze_profile, market research, growth plan, whitespace...).
+    (analyze_profile, market research, whitespace...).
 
     Tries each candidate model through run(client); model-class errors
     advance to the next candidate, fatal ones stop. On total failure the
@@ -1104,229 +1102,7 @@ def analyze_profile_fast(profile: ProfileData) -> ProfileInsight:
 
 
 # ---------------------------------------------------------------------------
-# Chain 4: growth plan (content suggestions + follower-growth actions)
-# ---------------------------------------------------------------------------
-
-_GROWTH_SYSTEM = (
-    "You are an Instagram growth strategist. You build plans ONLY from the "
-    "real data provided - never invent follower counts, benchmarks or "
-    "performances. Post ideas must be specific and ready to make (title, "
-    "format, why, caption hook, hashtags). Growth targets must be honest "
-    "ranges, not hype."
-)
-
-_GROWTH_HUMAN = """Account to grow:
-
-{facts}
-
-Sampled post performance (last {n_posts} posts, real data):
-{post_rows}
-
-{rival_block}
-
-Build a 30-day growth plan for this exact account:
-- content_pillars: 3-4 recurring themes that fit what already works here
-- post_ideas: 6-8 concrete posts (title, format, why it should earn likes/
-  comments/follows FOR THIS ACCOUNT, caption hook, hashtags)
-- weekly_schedule: Mon..Sun posting plan matching their current cadence,
-  pushing it slightly upward
-- format_mix: recommended reel/carousel/image ratio for this account
-- hashtag_sets: 3 rotating ready-to-paste sets of 8-12 hashtags matched to
-  their niche and size
-- engagement_tactics: daily actions that increase comments and follows
-- follower_growth_targets: honest 30/60/90-day follower ranges with what
-  it takes to hit them (baseline: {followers} followers, {er}% engagement)
-- quick_wins: 3 things they can do TODAY"""
-
-
-def _post_rows(posts) -> str:
-    lines = []
-    for p in posts[:12]:
-        lines.append(
-            f"- [{p.media_type}] {p.likes:,} likes, {p.comments:,} comments, "
-            f"{p.posted_days_ago}d ago | tags: {', '.join(p.hashtags[:4]) or '(none)'} | "
-            f"caption: {(p.caption or '(none)')[:80]}"
-        )
-    return "\n".join(lines) if lines else "- (no post data available)"
-
-
-def _rival_block(rivals: List[ProfileInsight]) -> str:
-    if not rivals:
-        return "(No competitor data fetched - plan from the account's own data only.)"
-    lines = ["Competitor accounts (real data) - what is working in this niche:"]
-    for r in rivals:
-        m, p = r.metrics, r.profile
-        lines.append(
-            f"- @{p.username} | {p.followers:,} followers | ER {m.engagement_rate}% | "
-            f"{m.posting_frequency_per_week}/wk | best format: {m.best_content_type} | "
-            f"top tags: {', '.join(m.top_hashtags[:4]) or '(none)'}"
-        )
-    return "\n".join(lines)
-
-
-def _rule_based_growth_plan(
-    main: ProfileInsight,
-    rivals: List[ProfileInsight],
-) -> GrowthPlan:
-    """Deterministic growth plan grounded in the account's own metrics."""
-    m, p = main.metrics, main.profile
-    tags = [t.lstrip("#") for t in m.top_hashtags]
-    niche = (p.category or "your niche").strip()
-    fmt = m.best_content_type if m.best_content_type != "n/a" else "reel"
-    cadence = m.posting_frequency_per_week
-    target_cadence = min(7, max(3, round(cadence + 1)) if cadence else 4)
-
-    summary = (
-        f"@{p.username} posts {cadence}/week with {m.engagement_rate}% engagement "
-        f"({ _rate_engagement(m.engagement_rate)}); {fmt} is the strongest format. "
-        f"The plan doubles down on {fmt} around {', '.join(tags[:3]) or niche}, "
-        f"lifts cadence to {target_cadence}/week, and adds daily comment-first "
-        f"engagement to convert reach into followers."
-    )
-
-    pillars = [
-        f"Educate: beginner mistakes & how-tos in {niche}",
-        f"Show proof: results, before/after, behind-the-scenes in {fmt} form",
-        f"Converse: questions and hot takes that invite comments",
-    ]
-    if tags:
-        pillars.append(f"Trend-ride: {fmt} takes on trending audio/topics in {', '.join(tags[:2])}")
-
-    ideas = [
-        PostIdea(
-            title=f"3 {niche} mistakes beginners keep making",
-            format="reel",
-            why="Mistake-framed hooks earn saves and shares; saves signal the algorithm to push reach, which drives follows.",
-            caption_concept="Hook: 'Stop doing #3.' End with: 'Which one are you guilty of? Comment below.'",
-            hashtags=[f"#{t}" for t in (tags[:3] or [niche.replace(" ", "")])],
-        ),
-        PostIdea(
-            title=f"How I'd start {niche} from zero in 2026",
-            format="carousel",
-            why="Step-by-step carousels get saved and re-shared; 'start from zero' framing pulls in new audiences.",
-            caption_concept="Slide 1 states the promise, last slide asks: 'Save this for later.'",
-            hashtags=[f"#{t}" for t in (tags[1:4] or [niche.replace(" ", "")])],
-        ),
-        PostIdea(
-            title=f"Behind the scenes: how we actually make our {niche} work",
-            format="reel",
-            why="BTS content humanizes the account - comment rates rise because it invites questions.",
-            caption_concept="Real process, no polish. End with 'Ask me anything about this process.'",
-            hashtags=[f"#{t}" for t in (tags[:2] + ["behindthescenes"])],
-        ),
-        PostIdea(
-            title=f"Replying to your top comment about {niche}",
-            format="video",
-            why="Reply-to-comment posts convert existing engagers into repeat commenters and signal a responsive community.",
-            caption_concept="Reference the commenter by name, answer in depth, invite the next question.",
-            hashtags=[f"#{t}" for t in (tags[:2] or [niche.replace(" ", "")])],
-        ),
-        PostIdea(
-            title=f"Before/after: one week of focused {niche} effort",
-            format="carousel",
-            why="Transformation content earns high saves and follows - people follow to see the next result.",
-            caption_concept="Side-by-side visuals; caption tells what changed and the one habit that mattered.",
-            hashtags=[f"#{t}" for t in (tags[:3] or [niche.replace(" ", "")])],
-        ),
-        PostIdea(
-            title=f"The truth about {niche} nobody posts",
-            format="reel",
-            why="Contrarian takes spark comment debates - the single strongest signal for comments.",
-            caption_concept="One bold but defensible claim; caption asks 'Agree or disagree?'",
-            hashtags=[f"#{t}" for t in (tags[:2] + [f"{niche.replace(' ', '')}tips"])],
-        ),
-    ]
-
-    schedule = [
-        f"Mon: {fmt} (pillar 1)",
-        "Tue: story day - poll + question sticker (no feed post)",
-        f"Wed: carousel (pillar 2)",
-        f"Thu: {fmt} reply-to-comment or trend-ride",
-        f"Fri: {fmt} (pillar 3 - conversation bait)",
-        "Sat: story day - BTS + countdown to Sunday post",
-        "Sun: carousel or image + CTA to follow for the series",
-    ]
-
-    base = "#" + niche.replace(" ", "").lower()
-    hashtag_sets = [
-        [f"#{t}" for t in (tags[:6] or [niche.replace(" ", "")])] + [f"{base}tips", f"{base}daily", f"{base}community", "#instagramgrowth"],
-        ["#reelsinstagram", "#explorepage", "#instagrowth", f"{base}lover", f"{base}oftheday", f"#{niche.replace(' ', '')}2026", f"{base}inspo", "#contentcreator"],
-        [f"#{t}" for t in (tags[2:6] or [niche.replace(" ", "")])] + [f"small{niche.replace(' ', '')}business", f"{base}tutorial", "#learnoninstagram", "#creatoreconomy"],
-    ]
-
-    tactics = [
-        "Reply to every comment within the first hour - early reply velocity is what pushes posts into Explore.",
-        "Spend 15 min/day commenting genuine, specific notes on 10 accounts in your niche - visibility that converts.",
-        "End every caption with ONE direct question; questions beat 'double tap' CTAs for comment counts.",
-        "Post stories daily with a poll or slider - story interactions lift your feed ranking.",
-        "Pin your 3 best-performing posts as a first-impression wall for new visitors.",
-        f"Publish {fmt} content before 10am or 6-9pm local time when your audience is most active.",
-    ]
-
-    targets = [
-        f"30 days: +{max(2, round(m.engagement_rate * 5))}-{max(5, round(m.engagement_rate * 10))}% relative engagement lift if cadence hits {target_cadence}/week with reels-led content.",
-        f"60 days: first compounding follower gains from Explore placement on 1-2 {fmt} posts per month.",
-        "90 days: follower growth tracks engagement growth - the honest lever is cadence + reply velocity, not follow/unfollow tricks.",
-        "Note: bought followers are not a target - they suppress engagement rate and kill reach.",
-    ]
-
-    quick_wins = [
-        f"Rewrite the bio to state who you help and how - then pin your best {fmt} post.",
-        "Add a question sticker to today's story to harvest comment fodder for this week's posts.",
-        "Reply to every unanswered comment on your last 5 posts right now.",
-    ]
-
-    return GrowthPlan(
-        summary=summary,
-        content_pillars=pillars[:4],
-        post_ideas=ideas,
-        weekly_schedule=schedule,
-        format_mix=f"Aim for ~{max(2, target_cadence - 2)} {fmt}/week, 1-2 carousels, 1 conversation post; stories daily.",
-        hashtag_sets=hashtag_sets,
-        engagement_tactics=tactics,
-        follower_growth_targets=targets,
-        quick_wins=quick_wins,
-    )
-
-
-def build_growth_plan(main: ProfileInsight, rivals: Optional[List[ProfileInsight]] = None) -> GrowthPlan:
-    """Content + follower-growth plan. LangChain chain when a key is set,
-    deterministic planner otherwise. Both are grounded ONLY in real data."""
-    rivals = rivals or []
-    plan = _rule_based_growth_plan(main, rivals)
-
-    if _llm_available():
-        try:
-            from langchain_core.prompts import ChatPromptTemplate
-            prompt = ChatPromptTemplate.from_messages(
-                [("system", _GROWTH_SYSTEM), ("human", _GROWTH_HUMAN)]
-            )
-
-            def _run(client):
-                chain = prompt | _structured(client, GrowthPlan)
-                return chain.invoke({
-                    "facts": _profile_facts(main.profile, main.metrics),
-                    "n_posts": len(main.profile.recent_posts),
-                    "post_rows": _post_rows(main.profile.recent_posts),
-                    "rival_block": _rival_block(rivals),
-                    "followers": f"{main.profile.followers:,}",
-                    "er": main.metrics.engagement_rate,
-                })
-
-            llm_plan: GrowthPlan = _invoke_llm_sync(_run)
-            # Sanity: never let an LLM hallucinate an empty plan — and a null
-            # result (congested NIM returns those) must not trip the breaker;
-            # the rule-based plan below is already valid.
-            if llm_plan is not None and llm_plan.post_ideas and llm_plan.content_pillars:
-                plan = llm_plan
-        except Exception as e:
-            print(f"[ai] growth plan: rule-based fallback ({str(e)[:110]})", flush=True)
-
-    return plan
-
-
-# ---------------------------------------------------------------------------
-# Chain 5: Instagram trend detection + content suggestions
+# Chain 4: Instagram trend detection + content suggestions
 # ---------------------------------------------------------------------------
 
 # A curated set of known recurring Instagram trend patterns. These are

@@ -32,9 +32,10 @@ is built honestly around that constraint:
 - **Real data only, by design.** Every number comes from a real source:
   the official Instagram Graph API (when configured), Apify's Instagram
   Scraper actor (when `APIFY_TOKEN` is set), or — with zero credentials —
-  the keyless **Playwright Chromium headless** provider: a real browser
-  opens instagram.com and reads Instagram's own `web_profile_info` JSON
-  from inside the page. Followers, bio, verification, and the 12 most
+  the **keyless direct Instagram HTTP layer**: bootstrapped browser-like
+  headers + cookies, then Instagram's own `web_profile_info` / GraphQL
+  endpoints over plain HTTP (no browser, no Playwright, no tokens).
+  Followers, bio, verification, and the 12 most
   recent posts with real likes, comments, timestamps and media types.
   Failures are honest errors (400 = handle does not exist, 503 = every
   provider blocked); simulated/demo data does not exist in this system.
@@ -71,8 +72,8 @@ insta-intel-agent/
 ├── backend/
 │   ├── main.py          FastAPI app: /api/analyze, /api/discover,
 │   │                    /api/competitor-research, /api/compare
-│   ├── scraper.py        Data layer (Graph API / Apify / keyless Playwright
-│   │                     Chromium, competitor discovery via related accounts)
+│   ├── scraper.py        Data layer (Graph API / Apify / keyless direct
+│   │                     Instagram HTTP, competitor discovery via related accounts)
 │   ├── ai_engine.py       LangChain chains: insights, competitor
 │   │                     selection, market research (+ rule fallbacks)
 │   ├── models.py          Pydantic schemas
@@ -155,14 +156,11 @@ identically without it.
 5. Add env vars `LLM_API_KEY` (optional) and `APIFY_TOKEN` (optional — mark as secret).
 6. Deploy. You'll get a URL like `https://your-app.onrender.com`.
 
-**Recommended for Render: no relay needed — real data via headless Chromium.**
-The backend ships a keyless Playwright Chromium provider: a real headless
-browser opens instagram.com and reads Instagram's own `web_profile_info`
-JSON from inside the page (same session, cookies and fingerprint as the
-site's own frontend), so no relay, token or third-party gateway is
-involved. The Docker image already includes Chromium; on a bare VPS install
-it once with `playwright install chromium` (or `apt install chromium` and
-set `IG_CHROME_PATH=/usr/bin/chromium`).
+**Recommended for Render: set `IG_PROXY_URL`.** The keyless fetch layer is
+pure HTTP (no browser), but Instagram hard-blocks datacenter IPs
+(Render/Railway/Fly get 401/429 on every call). Setting `IG_PROXY_URL`
+(e.g. a Webshare/IPRoyal residential proxy) routes every Instagram request
+through it and restores live fetching. Locally, no proxy is needed.
 
 **Frontend → Vercel or Netlify (free tier):**
 1. New project → import the repo, set root directory to `frontend`.
@@ -185,7 +183,7 @@ description), this is the real build process, in order:
 1. **Scope the problem honestly.** Realized "scrape any Instagram
    competitor" isn't something the official API allows, so designed the
    data layer as a provider ladder from day one (`get_profile()` tries
-   Graph API → Apify → keyless Playwright Chromium before failing with an
+   Graph API → Apify → keyless direct Instagram HTTP before failing with an
    honest error). This is a legitimate, common pattern in production
    systems that depend on third-party data.
 
