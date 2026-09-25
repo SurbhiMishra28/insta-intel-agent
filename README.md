@@ -162,6 +162,13 @@ pure HTTP (no browser), but Instagram hard-blocks datacenter IPs
 (e.g. a Webshare/IPRoyal residential proxy) routes every Instagram request
 through it and restores live fetching. Locally, no proxy is needed.
 
+**Free token-free alternative: your own Cloudflare Worker relay.** Deploy
+`infra/ig-relay-worker/` (one command: `npx wrangler deploy`, free tier =
+100k req/day) and set the backend env
+`IG_RELAY_URL=https://ig-relay.<you>.workers.dev`. The fetch ladder tries
+it FIRST whenever Instagram throttles the host's IP — see
+`infra/ig-relay-worker/README.md`.
+
 **Frontend → Vercel or Netlify (free tier):**
 1. New project → import the repo, set root directory to `frontend`.
 2. Build command: `npm run build`, output directory: `dist`.
