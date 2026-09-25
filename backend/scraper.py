@@ -1811,9 +1811,13 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
             if rresp.status_code != 200:
                 last_err = f"{last_err}; relay {relay_host} got HTTP {rresp.status_code}"
                 continue
+            # The self-relay reports Instagram's true status even on HTTP 200
+            # (empty body) — surface it so trails show WHY the page was empty.
+            relay_status = rresp.headers.get("x-relay-status")
             rprofile = _extract_profile_from_html(rresp.text, username)
             if rprofile is None:
-                last_err = f"{last_err}; relay {relay_host} page had no parseable profile"
+                note = f" (upstream {relay_status})" if relay_status and relay_status != "200" else ""
+                last_err = f"{last_err}; relay {relay_host} page had no parseable profile{note}"
                 continue
             if rprofile.recent_posts:
                 perf.stage("relay HTML has posts")
