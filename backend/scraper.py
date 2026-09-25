@@ -1256,6 +1256,12 @@ _DIRECT_HEADERS = {
 # live fetching on those hosts. Leave unset locally.
 _IG_PROXY_URL = (os.getenv("IG_PROXY_URL") or "").strip() or None
 
+# Relay-ladder cooldown: after a full pass where every public relay failed,
+# skip the ladder entirely for this window (dead-relay latency is up to
+# ~25s x N relays — pointless to re-pay on every throttled request).
+_RELAY_DOWN_COOLDOWN = float(os.getenv("IG_RELAY_COOLDOWN", "300"))
+_relay_down_until = 0.0
+
 
 def _ig_httpx_proxy() -> Optional[str]:
     """Proxy URL for httpx clients (httpx handles auth inside the URL).
@@ -1753,6 +1759,68 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
         record_fetch_event("ok", f"@{username} stats-only via HTML floor (no posts)")
         return html_floor
 
+    # Fallback 2: keyless public-relay ladder — DIFFERENT egress IPs.
+    # Datacenter hosts (Vercel/Render/Railway) get Instagram's own endpoints
+    # hard-throttled (401/429 on every call regardless of headers) while the
+    # same requests succeed from residential IPs. A CORS/reader relay fetches
+    # instagram.com FROM THE RELAY'S IPs and hands back the page HTML, which
+    # _extract_profile_from_html already parses (exact GraphQL-blob stats +
+    # embedded posts when present). No key, no login, no browser. Each relay
+    # failing just moves to the next; when every relay fails the request
+    # still fails honestly below instead of ever serving simulated data.
+    #
+    # _relay_down_until: when a full relay pass fails, skip the ladder for a
+    # cooldown window so throttled periods don't pay dead-relay latency on
+    # every request.
+    global _relay_down_until
+    relay_floor: Optional[ProfileData] = None  # real stats, no posts
+    if time.monotonic() >= _relay_down_until:
+        relay_targets = (
+            ("api.allorigins.win",
+             "https://api.allorigins.win/raw?url="
+             + quote(f"https://www.instagram.com/{username}/", safe="")),
+            ("corsproxy.io",
+             "https://corsproxy.io/?url="
+             + quote(f"https://www.instagram.com/{username}/", safe="")),
+            ("r.jina.ai",
+             f"https://r.jina.ai/https://www.instagram.com/{username}/",
+             {"x-return-format": "html"}),
+        )
+        for relay_host, relay_url, *extra_headers in relay_targets:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=max(_DIRECT_TIMEOUT, 25), follow_redirects=True,
+                    proxy=_ig_httpx_proxy(),
+                ) as client:
+                    rresp = await client.get(relay_url, headers={
+                        "user-agent": _DIRECT_HEADERS["user-agent"],
+                        "accept-language": "en-US,en;q=0.9",
+                        **(extra_headers[0] if extra_headers else {}),
+                    })
+            except httpx.HTTPError as e:
+                last_err = f"{last_err}; relay {relay_host} failed: {str(e)[:80]}"
+                continue
+            if rresp.status_code != 200:
+                last_err = f"{last_err}; relay {relay_host} got HTTP {rresp.status_code}"
+                continue
+            rprofile = _extract_profile_from_html(rresp.text, username)
+            if rprofile is None:
+                last_err = f"{last_err}; relay {relay_host} page had no parseable profile"
+                continue
+            if rprofile.recent_posts:
+                perf.stage("relay HTML has posts")
+                record_fetch_event("ok", f"@{username} via keyless relay {relay_host} (stats+posts)")
+                return rprofile
+            if relay_floor is None:
+                relay_floor = rprofile  # real stats without posts — keep as floor
+            last_err = f"{last_err}; relay {relay_host} served stats without posts"
+        if relay_floor is None:
+            _relay_down_until = time.monotonic() + _RELAY_DOWN_COOLDOWN
+
+    if relay_floor is not None:
+        record_fetch_event("ok", f"@{username} stats-only via keyless relay floor (no posts)")
+        return relay_floor
+
     record_fetch_event(
         "blocked",
         f"keyless ladder failed for @{username} (HTTP {last_status or 'n/a'}): {last_err}",
@@ -1761,7 +1829,11 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
         f"Keyless direct fetch failed for @{username} "
         f"(last HTTP status {last_status or 'n/a'}"
         f"{'; ' + last_err if last_err else ''}) — Instagram is rate-limiting "
-        "or blocking this IP. Try again shortly, or configure an Apify token."
+        "or blocking this host's IPs (expected on Vercel/Render datacenter "
+        "ranges). Fixes: set IG_PROXY_URL to a residential proxy, configure "
+        "an Apify token, or IG_ACCESS_TOKEN + IG_BUSINESS_ACCOUNT_ID (the "
+        "official Graph API allows datacenter IPs) — simulated data is "
+        "never served."
     )
 
 
