@@ -1262,6 +1262,12 @@ _IG_PROXY_URL = (os.getenv("IG_PROXY_URL") or "").strip() or None
 _RELAY_DOWN_COOLDOWN = float(os.getenv("IG_RELAY_COOLDOWN", "300"))
 _relay_down_until = 0.0
 
+# Self-hosted keyless relay (e.g. the free Cloudflare Worker in
+# infra/ig-relay-worker/): tried FIRST when set, before the public relays.
+# It is the user's own infrastructure — a plain URL, no API token — and its
+# egress IPs are Cloudflare's, which Instagram serves logged-out pages to.
+_SELF_RELAY_URL = (os.getenv("IG_RELAY_URL") or "").strip().rstrip("/")
+
 
 def _ig_httpx_proxy() -> Optional[str]:
     """Proxy URL for httpx clients (httpx handles auth inside the URL).
@@ -1775,17 +1781,19 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
     global _relay_down_until
     relay_floor: Optional[ProfileData] = None  # real stats, no posts
     if time.monotonic() >= _relay_down_until:
-        relay_targets = (
+        ig_page = f"https://www.instagram.com/{username}/"
+        relay_targets: Tuple[Tuple[str, str, dict], ...] = (
             ("api.allorigins.win",
-             "https://api.allorigins.win/raw?url="
-             + quote(f"https://www.instagram.com/{username}/", safe="")),
+             "https://api.allorigins.win/raw?url=" + quote(ig_page, safe=""), {}),
             ("corsproxy.io",
-             "https://corsproxy.io/?url="
-             + quote(f"https://www.instagram.com/{username}/", safe="")),
+             "https://corsproxy.io/?url=" + quote(ig_page, safe=""), {}),
             ("r.jina.ai",
-             f"https://r.jina.ai/https://www.instagram.com/{username}/",
-             {"x-return-format": "html"}),
+             f"https://r.jina.ai/{ig_page}", {"x-return-format": "html"}),
         )
+        if _SELF_RELAY_URL:
+            relay_targets = (
+                ("self-relay", f"{_SELF_RELAY_URL}/?url={quote(ig_page, safe='')}", {}),
+            ) + relay_targets
         for relay_host, relay_url, *extra_headers in relay_targets:
             try:
                 async with httpx.AsyncClient(
@@ -1830,10 +1838,11 @@ async def _fetch_direct_profile(username: str) -> ProfileData:
         f"(last HTTP status {last_status or 'n/a'}"
         f"{'; ' + last_err if last_err else ''}) — Instagram is rate-limiting "
         "or blocking this host's IPs (expected on Vercel/Render datacenter "
-        "ranges). Fixes: set IG_PROXY_URL to a residential proxy, configure "
-        "an Apify token, or IG_ACCESS_TOKEN + IG_BUSINESS_ACCOUNT_ID (the "
-        "official Graph API allows datacenter IPs) — simulated data is "
-        "never served."
+        "ranges). Token-free fix: deploy the free Cloudflare Worker relay "
+        "(infra/ig-relay-worker/) and set IG_RELAY_URL. Other fixes: "
+        "IG_PROXY_URL (residential proxy), an Apify token, or "
+        "IG_ACCESS_TOKEN + IG_BUSINESS_ACCOUNT_ID (official Graph API) — "
+        "simulated data is never served."
     )
 
 
